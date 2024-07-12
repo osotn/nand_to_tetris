@@ -1,6 +1,5 @@
 *.o
 *.out
-*
 tmp*
 *.swp
 *.asm-*
