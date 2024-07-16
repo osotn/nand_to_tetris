@@ -1107,8 +1107,10 @@ int asm_is_correct_symbol_name(char* symbol)
 
 int asm_is_correct_literal(char* literal)
 {
-    if (strlen(literal) == 0)
+    if (strlen(literal) == 0) {
+        printf("asm: empty literal\n");
         return -1;
+    }
     int i = 0;
     uint8_t c;
     while((c=literal[i++]) != '\0') {
@@ -1517,6 +1519,440 @@ int asm_translate(char* asm_file_name, uint8_t out_format, asm_symbol_tbl_t* sym
     fclose(out_file);
     return 0;
 }
+
+enum {
+    VM_OUT_FORMAT_STRIP = 1,
+    VM_OUT_FORMAT_ASM = 2
+};
+
+void vm_strip_line(char* line, char* strip_line)
+{
+    int i = 0;
+    int j = 0;
+    uint8_t is_space = 0;
+
+    while (line[i] != '\0') {
+        if (line[i] == '/' && line[i+1] == '/') { // comment
+            break;
+        }
+        if (isspace(line[i])) {
+            i++;
+            is_space = 1;
+            continue;
+        }
+        else {
+            if (is_space) {
+                if (j)
+                    strip_line[j++] = ' ';
+                is_space = 0;
+            }
+        }
+
+        strip_line[j++] = line[i++];
+    }
+    strip_line[j] = '\0';
+}
+
+#define VM_COMMAND_LINE_MAX 256
+
+char* vm_get_command_line(char* line, char* command)
+{
+    int i = 0;
+    int j = 0;
+    uint8_t c;
+    while ((c = line[i++]) != '\0') {
+        if (!isalpha(c) && !isdigit(c) && c != '-') {
+            if (c != ' ') {
+                printf("vm: - error cmd has symbol %c\n", c);
+                return NULL;
+            }
+            if (j == 0) {
+                printf("vm: - error emtpy cmd\n");
+                return NULL;
+            }
+            break;
+        }
+        if (j >= VM_COMMAND_LINE_MAX) {
+            printf("vm: -error very long command >= %d\n", VM_COMMAND_LINE_MAX);
+            return NULL;
+        }
+        command[j++] = c;
+    }
+    command[j] = '\0';
+    return (line + i);
+}
+
+enum {
+    VM_INSTRUCTION_FAIL             = 0,
+    VM_INSTRUCTION_FUNCTION         = 1,
+    VM_INSTRUCTION_PUSH             = 2,
+    VM_INSTRUCTION_LT               = 3,
+};
+
+struct {
+    char* name;
+    uint8_t type;
+} vm_command_st[] = {
+    {"function",     VM_INSTRUCTION_FUNCTION},
+    {"push",         VM_INSTRUCTION_PUSH},
+    {"lt",           VM_INSTRUCTION_LT},
+};
+
+uint8_t vm_get_instruction_type(char* line, char** next)
+{
+    char command_line[VM_COMMAND_LINE_MAX+1];
+
+    *next = vm_get_command_line(line, command_line);
+    if (*next == NULL)
+        return VM_INSTRUCTION_FAIL;
+
+    printf("vm: command_line = %s; next = <%s>\n", command_line, *next);
+
+    uint8_t command_type = VM_INSTRUCTION_FAIL;
+    int i;
+    for(i = 0; i < AR_SIZEOF(vm_command_st); i++) {
+        if (!strcmp(command_line, vm_command_st[i].name)) {
+            command_type = vm_command_st[i].type;
+            break;
+        }
+    }
+
+    return command_type;
+}
+
+char* vm_get_label_line(char* line, char* label)
+{
+    int i = 0;
+    int j = 0;
+    uint8_t c;
+    while ((c=line[i++]) != '\0') {
+        if (isspace(c)) {
+            if (j == 0) {
+                printf("vm: - error empty label\n");
+                return NULL;
+            }
+            break;
+        }
+        label[j++] = c;
+    }
+    label[j] = '\0';
+
+    if (asm_is_correct_symbol_name(label) < 0) {
+        return NULL;
+    }
+
+    return (line + i);
+}
+
+char* vm_get_literal(char* line, char* literal)
+{
+    int i = 0;
+    int j = 0;
+    uint8_t c;
+    while ((c=line[i++]) != '\0') {
+        if (!isdigit(c)) {
+            if (c != ' ') {
+                printf("vm; - error character %c in literal\n", c);
+                return NULL;
+            }
+            if (j == 0) {
+                printf("vm: - error empty literal\n");
+                return NULL;
+            }
+            break;
+        }
+        literal[j++] = c;
+    }
+    literal[j] = '\0';
+
+    if (asm_is_correct_literal(literal) < 0) {
+        return NULL;
+    }
+
+    return (line + i);
+}
+
+int vm_write_push_d_and_inc_sp(char* asm_lines)
+{
+    sprintf(asm_lines, 
+                // *(*SP) = D; SP++
+                /// *(*SP) = D
+                "@SP\n"
+                "A=M\n"
+                "M=D\n"
+                /// SP++
+                "@SP\n"
+                "M=M+1\n");
+    return 0;
+}
+
+int vm_write_pop_d_and_dec_sp(char* asm_lines)
+{
+    sprintf(asm_lines, 
+                /// D = *(SP-1); SP = SP-1
+                "@SP\n"
+                "AM=M-1\n"
+                "D=M\n");
+    return 0;
+}
+    
+
+int vm_write_push_reg(char* reg, uint16_t n, char* asm_lines)
+{
+    // *(*SP) = *(*(reg) + n)
+    /// D = *(*(reg) + n)
+    if (n > 1) {
+        sprintf(asm_lines, 
+                    "@%u\n"
+                    "D=A\n", n);
+        asm_lines += strlen(asm_lines);
+    }
+    sprintf(asm_lines, 
+                    "@%s\n", reg);
+    asm_lines += strlen(asm_lines);
+    if (n == 0) {
+        sprintf(asm_lines, 
+                    "A=M\n");
+    }
+    else if (n == 1) {
+        sprintf(asm_lines, 
+                    "A=M+1\n");
+    }
+    else {
+        sprintf(asm_lines, 
+                    "A=D+M\n");
+    }
+    asm_lines += strlen(asm_lines);
+    sprintf(asm_lines, 
+                    "D=M\n");
+    vm_write_push_d_and_inc_sp(asm_lines + strlen(asm_lines));
+    return 0;
+}
+
+int vm_write_push(char* segment, char* literal, char* asm_lines)
+{
+    uint16_t literal_num = (uint16_t)strtol(literal, NULL, 10);
+
+    if (!strcmp(segment, "constant")) {
+        // D = a
+        sprintf(asm_lines, 
+                    // D = a
+                    "@%u\n"
+                    "D=A\n",
+                    literal_num);
+        vm_write_push_d_and_inc_sp(asm_lines + strlen(asm_lines));
+        return 0;
+    }
+    else if (!strcmp(segment, "argument")) {
+        if (vm_write_push_reg("ARG", literal_num, asm_lines) < 0)
+            return -1;
+        return 0;
+    }
+    
+    printf("vm: - error push unknow segment %s\n", segment);
+    return -1; 
+}
+
+int vm_write_function(char* label, char* literal, char* asm_lines)
+{
+    int16_t n = (int16_t)strtol(literal, NULL, 10);
+
+    sprintf(asm_lines, "(%s)\n", label);
+    int i;
+    for (i = 0; i < n; i++) {
+        if (vm_write_push("constant", "0", (asm_lines + strlen(asm_lines))) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+uint16_t s_label_num = 0;
+
+int vm_write_compare(char* cmd, char* asm_lines)
+{
+    vm_write_pop_d_and_dec_sp(asm_lines);
+    sprintf(asm_lines + strlen(asm_lines), 
+                "A=A-1\n"
+                "D=M-D\n"
+                "@%s_TRUE_%u\n"
+                "D;J%s\n"
+                "@SP\n"
+                "A=M-1\n"
+                "M=0\n"
+                "@%s_END_%u\n"
+                "0:JMP\n"
+                "(%s_TRUE_%u)\n"
+                "@SP\n"
+                "A=M-1\n"
+                "M=-1\n"
+                "(%s_END_%u)\n",
+                cmd, s_label_num,
+                cmd,
+                cmd, s_label_num,
+                cmd, s_label_num,
+                cmd, s_label_num);
+    s_label_num++;
+    return 0;
+}
+
+int vm_write_asm(uint8_t instuction_type, char** next, char* asm_lines)
+{
+    char label[ASM_SYMBOL_MAX_LEN+1];
+    char literal[ASM_LITERAL_MAX_LEN+1];
+
+    if (instuction_type == VM_INSTRUCTION_FUNCTION) {
+        *next = vm_get_label_line(*next, label);
+        if (*next == NULL)
+            return -1;
+        printf("vm: function name = %s, next = <%s>\n", label, *next);
+        
+        *next = vm_get_literal(*next, literal);
+        if (*next == NULL)
+            return -1;
+        printf("vm: function n args = %s, next = <%s>\n", literal, *next);
+
+        if (vm_write_function(label, literal, asm_lines) < 0)
+            return -1;
+    }
+    if (instuction_type == VM_INSTRUCTION_PUSH) {
+        *next = vm_get_label_line(*next, label);
+        if (*next == NULL)
+            return -1;
+        printf("vm: push segment = %s, next = <%s>\n", label, *next);
+        
+        *next = vm_get_literal(*next, literal);
+        if (*next == NULL)
+            return -1;
+        printf("vm: push n = %s, next = <%s>\n", literal, *next);
+
+        if (vm_write_push(label, literal, asm_lines) < 0)
+            return -1;
+    }
+    if (instuction_type == VM_INSTRUCTION_LT) {
+        vm_write_compare("lt", asm_lines);
+    }
+
+    return 0;
+}
+
+int vm_translate(char* vm_file_name, uint8_t out_format, char* out_file_name)
+{
+    FILE* vm_file;
+    FILE* out_file;
+
+    vm_file = fopen(vm_file_name, "r");
+    if (vm_file == NULL) {
+        printf("vm: err to open asm file %s\n", vm_file_name);
+        return -1;
+    }
+
+    out_file = fopen(out_file_name, "w");
+    if (out_file == NULL) {
+        printf("vm: err to create out file %s\n", out_file_name);
+        fclose(vm_file);
+        return -1;
+    }
+
+    #define VM_LINE_MAX_LEN 1024
+    char line[VM_LINE_MAX_LEN+1];
+    char strip_line[VM_LINE_MAX_LEN+1];
+    int n = 0;
+
+    #define VM_ASM_LINES_MAX 2048
+    char asm_lines[VM_ASM_LINES_MAX+1];
+
+    if (out_format == VM_OUT_FORMAT_ASM) {
+          sprintf(asm_lines, "// asm: bootstrap\n"
+                             "@256\n"
+                             "D=A\n"
+                             "@SP\n"
+                             "M=D\n");
+          fwrite(asm_lines, 1, strlen(asm_lines), out_file);
+    }
+
+    while (fgets(line, sizeof(line), vm_file) != NULL) {
+        printf("vm: line %d <%s>, len = %d\n", n, line, (int)strlen(line));
+        if (strlen(line) >= VM_LINE_MAX_LEN) {
+            printf("vm: -err line %d - str of line is too big = %d \n", n, (int)strlen(line));
+            break;
+        }
+        vm_strip_line(line, strip_line);
+        printf("vm: strip_line %d <%s>, len = %d\n", n, strip_line, (int)strlen(strip_line));
+        if (strlen(strip_line) == 0)
+            continue;
+        if (out_format == VM_OUT_FORMAT_STRIP) {
+            fwrite(strip_line, 1, strlen(strip_line), out_file);
+            fwrite("\n", 1, 1, out_file);
+        }
+
+        if (out_format == VM_OUT_FORMAT_STRIP)
+            continue;
+
+        char* next;
+        uint8_t instruction_type = vm_get_instruction_type(strip_line, &next);
+        printf("vm: line %d instruction type = %d\n", n, instruction_type);
+
+
+        if (instruction_type == VM_INSTRUCTION_FAIL) {
+            printf("vm: -err line %d - fail instruction type\n", n);
+            break;
+        }
+
+        if (out_format == VM_OUT_FORMAT_ASM) {
+            char str_comment[VM_LINE_MAX_LEN+1+256];
+            sprintf(str_comment, "// vm: line %d <%s>\n", n, strip_line);
+            fwrite(str_comment, 1, strlen(str_comment), out_file);
+        }
+
+        n++;
+
+        if (vm_write_asm(instruction_type, &next, asm_lines) < 0) {
+            break;
+        }
+        if (out_format == VM_OUT_FORMAT_ASM) {
+          fwrite(asm_lines, 1, strlen(asm_lines), out_file);
+        }
+        
+
+#if 0
+
+
+        uint16_t code;
+        if (asm_decode(symbol_tbl, strip_line, instruction_type, &code) < 0)
+            break;
+        char binary_str[16+1+1];
+        uint16_t u = code;
+        int i;
+        for (i=0; i<16; i++) {
+            binary_str[16-1-i] =  (u & 0x01) ? '1' : '0';
+            u >>= 1;
+        }
+        binary_str[16] = '\n';
+        binary_str[17] = '\0';
+
+        if (out_format == ASM_OUT_FORMAT_BIN) {
+            fwrite(binary_str, 1, strlen(binary_str), out_file);
+        }
+    }
+    
+    if (out_format == ASM_OUT_FORMAT_SYMBOLS) {
+        asm_set_variable_addr_symbol_tbl(symbol_tbl);
+
+        int i;
+        for (i = 0; i < symbol_tbl->n; i++) {
+            char asm_comment[ASM_LINE_MAX_LEN+1] = {'\0'};
+            sprintf(asm_comment, "// ASM: stbl %d. %s = %d\n", i, symbol_tbl->symbols[i].symbol_name, symbol_tbl->symbols[i].symbol_value);
+            fwrite(asm_comment, 1, strlen(asm_comment), out_file);
+        }
+    }
+#endif
+    }
+
+    fclose(vm_file);
+    fclose(out_file);
+    return 0;
+}
+
 
 
 int main()
@@ -1973,13 +2409,17 @@ int main()
 
 	    computer_init(&computer);
 	    
+	    
+	    vm_translate("fibonacci.vm", VM_OUT_FORMAT_STRIP, "fibonacci.vm_strip");
+	    vm_translate("fibonacci.vm", VM_OUT_FORMAT_ASM, "fibonacci.asm");
+	    
 	    asm_symbol_tbl_t symbol_tbl;
 	    asm_init_symbol_tbl(&symbol_tbl);
-	    asm_translate("rect.asm", ASM_OUT_FORMAT_SYMBOLS, &symbol_tbl, "rect.asm_symbol");
-	    asm_translate("rect.asm", ASM_OUT_FORMAT_LITERALS, &symbol_tbl, "rect.asm_literal");
-	    asm_translate("rect.asm", ASM_OUT_FORMAT_BIN, &symbol_tbl, "rect.hack");
+	    asm_translate("fibonacci.asm", ASM_OUT_FORMAT_SYMBOLS, &symbol_tbl, "fibonacci.asm_symbol");
+	    asm_translate("fibonacci.asm", ASM_OUT_FORMAT_LITERALS, &symbol_tbl, "fibonacci.asm_literal");
+	    asm_translate("fibonacci.asm", ASM_OUT_FORMAT_BIN, &symbol_tbl, "fibonacci.hack");
 
-        int res = rom32k_load(&(computer.rom32k), "rect.hack");
+        int res = rom32k_load(&(computer.rom32k), "fibonacci.hack");
         if (res != 0) {
             return -1;
         }
@@ -2123,13 +2563,15 @@ int main()
 
         sprintf(str_ram, " SP : 0x%.4x\n"
                          " LCL: 0x%.4x\n"
+                         " ARG: 0x%.4x\n"
                          "THIS: 0x%.4x\n"
                          "THAT: 0x%.4x\n", 
                 (uint16_t)computer.memory.ram16k.mem[0],
                 (uint16_t)computer.memory.ram16k.mem[1],
                 (uint16_t)computer.memory.ram16k.mem[2],
-                (uint16_t)computer.memory.ram16k.mem[3]);
-        for (i = 4; i < 16; i++) {
+                (uint16_t)computer.memory.ram16k.mem[3],
+                (uint16_t)computer.memory.ram16k.mem[4]);
+        for (i = 5; i < 16; i++) {
             sprintf(str, " R%2d: 0x%.4x\n", i, (uint16_t)computer.memory.ram16k.mem[i]);
             strcat(str_ram, str);
         }
