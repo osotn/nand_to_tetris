@@ -423,20 +423,22 @@ void pc16_run(pc16_t* pc16, bit_t reset, bit16_t* in16, bit_t load)
 
 typedef struct {
     int16_t mem[MEM_16K];
-    bit16_t out16;
 } ram16k_t;
 
 void ram16k_init(ram16k_t* ram16k)
 {
-    int16_to_bit16(0, &(ram16k->out16));
     int i;
     for (i=0; i<MEM_16K; i++)
         ram16k->mem[i] = 0;
 }
 
-bit16_t ram16k_get_output(ram16k_t* ram16k)
+bit16_t ram16k_get_output(ram16k_t* ram16k, bit16_t* addr)
 {
-    return ram16k->out16;
+    bit16_t out = bit16_zeros;
+    uint16_t mem_addr = (uint16_t)bit16_to_int16(addr);
+    if (mem_addr < MEM_16K)
+        int16_to_bit16(ram16k->mem[mem_addr], &out);
+    return out;
 }
 
 void ram16k_run(ram16k_t* ram16k, bit16_t* in, bit_t load, bit16_t* addr)
@@ -444,10 +446,8 @@ void ram16k_run(ram16k_t* ram16k, bit16_t* in, bit_t load, bit16_t* addr)
     uint16_t mem_addr = (uint16_t)bit16_to_int16(addr);
 
     if (mem_addr < MEM_16K) {
-        int16_to_bit16(ram16k->mem[mem_addr], &(ram16k->out16));
-        if (load) {
+        if (load)
             ram16k->mem[mem_addr] = bit16_to_int16(in);
-        }
     }
 }
 
@@ -468,20 +468,22 @@ void ram16k_dump(ram16k_t* ram16k, uint16_t addr, int n)
 
 typedef struct {
     int16_t mem[MEM_8K];
-    bit16_t out16;
 } screen_t;
 
 void screen_init(screen_t* screen)
 {
-    int16_to_bit16(0, &(screen->out16));
     int i;
     for (i=0; i<MEM_8K; i++)
         screen->mem[i] = 0;
 }
 
-bit16_t screen_get_output(screen_t* screen)
+bit16_t screen_get_output(screen_t* screen, bit16_t* addr)
 {
-    return screen->out16;
+    bit16_t out = bit16_zeros;
+    uint16_t mem_addr = (uint16_t)bit16_to_int16(addr);
+    if (mem_addr < MEM_8K)
+        int16_to_bit16(screen->mem[mem_addr], &out);
+    return out;
 }
 
 uint16_t screen_debug = 0;
@@ -497,7 +499,6 @@ void screen_run(screen_t* screen, bit16_t* in, bit_t load, bit16_t* addr)
     }
 
     if (mem_addr < MEM_8K) {
-        int16_to_bit16(screen->mem[mem_addr], &(screen->out16));
         if (load) {
             screen->mem[mem_addr] = bit16_to_int16(in);
             if (screen_debug) {
@@ -626,7 +627,7 @@ void keyboard_set_code(keyboard_t* keyboard, uint16_t code)
 
 void keyboard_run(keyboard_t* keyboard)
 {
-    // TODO - get code from system keyboard.
+    // Nothing
 }
 
 uint16_t memory_debug = 0;
@@ -635,7 +636,6 @@ typedef struct {
     ram16k_t   ram16k;
     screen_t   screen;
     keyboard_t keyboard;
-    bit16_t    out16;
 } memory_t;
 
 void memory_init(memory_t* memory)
@@ -643,13 +643,18 @@ void memory_init(memory_t* memory)
     ram16k_init(&(memory->ram16k));
     screen_init(&(memory->screen));
     keyboard_init(&(memory->keyboard));
-
-    int16_to_bit16(0, &(memory->out16));
 }
 
-bit16_t memory_get_output(memory_t* memory)
+bit16_t memory_get_output(memory_t* memory, bit16_t* addr)
 {
-    return memory->out16;
+    bit16_t out;
+    bit_t sel0 = addr->bit[13];
+    bit_t sel1 = addr->bit[14];
+    bit16_t out_ram16k = ram16k_get_output(&(memory->ram16k), addr);
+    bit16_t out_screen = screen_get_output(&(memory->screen), addr);
+    bit16_t out_keyboard = keyboard_get_output(&(memory->keyboard));
+    mux4way16(&out_ram16k, &out_ram16k, &out_screen, &out_keyboard, sel0, sel1, &out);
+    return out;
 }
 
 void memory_run(memory_t* memory, bit16_t* in, bit_t load, bit16_t* addr)
@@ -677,13 +682,6 @@ void memory_run(memory_t* memory, bit16_t* in, bit_t load, bit16_t* addr)
     addr14.bit[13] = 0;
     screen_run(&(memory->screen), in, c, &addr14);
     keyboard_run(&(memory->keyboard));
-
-    bit16_t out;
-    bit16_t out_ram16k = ram16k_get_output(&(memory->ram16k));
-    bit16_t out_screen = screen_get_output(&(memory->screen));
-    bit16_t out_keyboard = keyboard_get_output(&(memory->keyboard));
-    mux4way16(&out_ram16k, &out_ram16k, &out_screen, &out_keyboard, sel0, sel1, &out);
-    memory->out16 = out;
 }
 
 #define MEM_32K 0x8000
@@ -758,10 +756,16 @@ int rom32k_load(rom32k_t *rom32k, char* file_name)
 typedef struct {
 	reg16_t reg_a16, reg_d16;
 	pc16_t  pc16;
+	// reference feedback data
+	memory_t* ext_memory;
+	rom32k_t* ext_rom;
 } cpu_t;
 
-void cpu_init(cpu_t* cpu)
+void cpu_init(cpu_t* cpu, memory_t* ext_memory, rom32k_t* ext_rom)
 {
+    cpu->ext_memory = ext_memory;
+    cpu->ext_rom    = ext_rom;
+
 	reg16_init(&(cpu->reg_a16), "cpu:reg_a16");
 	reg16_init(&(cpu->reg_d16), "cpu:reg_d16");
 	pc16_init(&(cpu->pc16));
@@ -799,7 +803,7 @@ char* asm_a_jump_name[] = {
         "JGT",      // 0 0 1
         "JEQ",      // 0 1 0
         "JGE",      // 0 1 1
-        "JTL",      // 1 0 0
+        "JLT",      // 1 0 0
         "JNE",      // 1 0 1
         "JLE",      // 1 1 0
         "JMP"       // 1 1 1
@@ -875,11 +879,25 @@ char* instruction_bit16_to_asm(char* str, bit16_t* bit16)
     return str;
 }
 
+/*
+ *         |<==============================*============================|
+ *         |                               |       |f3                  |
+ *         |==>|-\      +-----+            |    +--V--+   +----+        |
+ * instr       |  |====>|reg_A|====>|      |===>|reg_D|==>|     \       |
+ *  ==========>|-/      +--^--+     |           +-----+    \ ALU |      |    out_M
+ *              ^          |f2      |                       |    |======|========> 
+                |f1                 *============>|-\      /     |         write_M
+   in_m                             |             |  |===>|     /        ^------->
+ *  =============================================>|-/     +----+         |f6
+ *                                  |              ^         ^
+ *                                  |              |f4       |ccccc         addr_M
+ *                                  *============================================>
+ *                                  |               |f5
+ *                                  |           +---V--+                     PC
+ *                                  |==========>|cnt_PC|=========================>
+ *                                              +------+
+ */
 
-uint8_t cpu_debug = 0;
-
-void cpu_run(cpu_t* cpu, bit16_t* in_m, bit16_t* instruction, bit_t reset, bit16_t* out_m, bit_t* wr_m, bit16_t* addr_m, bit16_t* pc)
-{
 	// A instruction:   0vvvvvvvvvvvvvvv        v => A
 	// C instruction:   1xxaccccccdddjjj
 
@@ -902,81 +920,113 @@ void cpu_run(cpu_t* cpu, bit16_t* in_m, bit16_t* instruction, bit_t reset, bit16
  *      A-D  M-D    0 0 0 1 1 1
  *      D&A  D&M    0 0 0 0 0 0 
  *      D|A  D|M    0 1 0 1 0 1
- */                           
+ */
 
 
 
-	bit_t is_c_instruction = instruction->bit[15];
-        
-	bit_t is_a_instruction; gate_not(is_c_instruction, &is_a_instruction);
+void cpu_get_outputs_internal(cpu_t* cpu, bit16_t* alu_out, bit_t* alu_nz, bit_t* alu_ng, bit_t* wr_m, bit16_t* addr_m, bit16_t* pc)
+{
+    // A16, D16
+    bit16_t a16 = reg16_get_output(&(cpu->reg_a16));
+    bit16_t d16 = reg16_get_output(&(cpu->reg_d16));
 
-	bit_t sel_a = is_a_instruction;
-	
-	bit_t load_a;  gate_or(is_a_instruction, instruction->bit[5]  /* d1: dest = A */, &load_a);
+    // PC16
+    *pc = pc16_get_output(&(cpu->pc16));
 
-	bit_t load_d;  gate_and(is_c_instruction, instruction->bit[4] /* d2: dest = D */, &load_d);	
+    // Instruction = f(PC16)
+    bit16_t instruction = rom32k_get_output(cpu->ext_rom, pc);
 
-	bit_t write_m; gate_and(is_c_instruction, instruction->bit[3] /* d3: dest = M */, &write_m);
+    // Memory addr
+    *addr_m = a16;
 
-	bit_t sel_alu_y = instruction->bit[12];
+    // Memory input = f(memory addr)
+    bit16_t in_m = memory_get_output(cpu->ext_memory, addr_m);
 
-	bit_t alu_zx = instruction->bit[11];
-	bit_t alu_nx = instruction->bit[10];
-	bit_t alu_zy = instruction->bit[9];
-	bit_t alu_ny = instruction->bit[8];
-	bit_t alu_f  = instruction->bit[7];
-	bit_t alu_nf = instruction->bit[6];
-	bit_t alu_nz;
-	bit_t alu_ng;
+    // ALU
+	bit16_t alu_x, alu_y;
+	/// x
+	alu_x = d16;
+	/// y
+	bit_t sel_alu_y = instruction.bit[12];
+	mux16(&a16, &in_m, sel_alu_y, &alu_y);
+	/// control
+    bit_t alu_zx = instruction.bit[11];
+	bit_t alu_nx = instruction.bit[10];
+	bit_t alu_zy = instruction.bit[9];
+	bit_t alu_ny = instruction.bit[8];
+	bit_t alu_f  = instruction.bit[7];
+	bit_t alu_nf = instruction.bit[6];
+	/// out
+	alu(&alu_x, &alu_y, alu_zx, alu_nx, alu_zy, alu_ny, alu_f, alu_nf, alu_out, alu_nz, alu_ng);
 
-	bit_t load_pc;
+    // Memory wr
+    bit_t is_c_instruction = instruction.bit[15];
+	gate_and(is_c_instruction, instruction.bit[3] /* d3: dest = M */, wr_m);
+}
 
-	bit16_t in_a, out_a;
-	bit16_t alu_x, alu_y, alu_out;
+void cpu_get_outputs(cpu_t* cpu, bit16_t* out_m, bit_t* wr_m, bit16_t* addr_m, bit16_t* pc)
+{
+    bit16_t alu_out;
+    bit_t alu_nz, alu_ng;
+    cpu_get_outputs_internal(cpu, &alu_out, &alu_nz, &alu_ng, wr_m, addr_m, pc);
+    *out_m = alu_out;
+}
 
-	
+void cpu_run(cpu_t* cpu, bit_t reset)
+{
+    bit16_t   alu_out;
+    bit_t alu_nz, alu_ng;
+    bit_t      wr_m;
+    bit16_t  addr_m;
+    bit16_t    pc;
 
-	out_a = reg16_get_output(&(cpu->reg_a16));
-	mux16(&out_a, in_m, sel_alu_y, &alu_y);
+    // Get outputs
+    cpu_get_outputs_internal(cpu, &alu_out, &alu_nz, &alu_ng, &wr_m /*isn't used*/, &addr_m /*isn't used*/, &pc);
 
-	alu_x = reg16_get_output((&cpu->reg_d16));
-	alu(&alu_x, &alu_y, alu_zx, alu_nx, alu_zy, alu_ny, alu_f, alu_nf, &alu_out, &alu_nz, &alu_ng);
-	mux16(&alu_out, instruction, sel_a, &in_a);
+    // Instruction = f(PC16)
+    bit16_t instruction = rom32k_get_output(cpu->ext_rom, &pc);
 
-	if (cpu_debug) {
-		char str[BIT16_SIZE];
-		printf("cpu debug: out = %s (0x%x, %d), nz = %s, ng = %s\n",
-				bit16_to_string(str, &alu_out), bit16_to_int16(&alu_out), bit16_to_int16(&alu_out),
-				bit_to_string(alu_nz), bit_to_string(alu_ng));
-	}
+    // Control = f(instruction)
+	bit_t is_a_instruction;
+	bit_t is_c_instruction = instruction.bit[15];
+	gate_not(is_c_instruction, &is_a_instruction);
 
-	reg16_run(&(cpu->reg_d16), &alu_out, load_d);
-	reg16_run(&(cpu->reg_a16), &in_a, load_a);
+    // A16
+    bit16_t a16 = reg16_get_output(&(cpu->reg_a16));
+    bit_t sel_a = is_a_instruction;
+    bit16_t in_a;
+	mux16(&alu_out, &instruction, sel_a, &in_a);
+    bit_t load_a;
+    gate_or(is_a_instruction, instruction.bit[5]  /* d1: dest = A */, &load_a);
 
-	bit_t jgt = instruction->bit[0];
-	bit_t jeq = instruction->bit[1];
-	bit_t jlt = instruction->bit[2];
+    // D16
+	bit_t load_d;
+    gate_and(is_c_instruction, instruction.bit[4] /* d2: dest = D */, &load_d);
 
-	bit_t zero; gate_not(alu_nz, &zero);
-	bit_t pos;  gate_not(alu_ng, &pos); gate_and(pos, alu_nz, &pos);
-
+    // PC16
+    bit_t load_pc;
+    bit_t jgt = instruction.bit[0];
+	bit_t jeq = instruction.bit[1];
+	bit_t jlt = instruction.bit[2];
+	bit_t zero;
+	gate_not(alu_nz, &zero);
+	bit_t pos;
+	gate_not(alu_ng, &pos);
+	gate_and(pos, alu_nz, &pos);
 	gate_and(jgt, pos,    &jgt);
 	gate_and(jeq, zero,   &jeq);
 	gate_and(jlt, alu_ng, &jlt);	
-
 	or3_out1(jgt, jeq, jlt, &load_pc);
 	gate_and(load_pc, is_c_instruction, &load_pc);
 
-	pc16_run(&(cpu->pc16), reset, &out_a, load_pc);
-
-	*wr_m = write_m;
-	*out_m = alu_out;
-	*addr_m = reg16_get_output(&(cpu->reg_a16)); addr_m->bit[15] = 0;
-	*pc = pc16_get_output(&(cpu->pc16)); pc->bit[15] = 0;
+    /// RUN
+    reg16_run(&(cpu->reg_a16), &in_a, load_a);
+	reg16_run(&(cpu->reg_d16), &alu_out, load_d);
+    pc16_run(&(cpu->pc16), reset, &a16, load_pc);
 }
 
 typedef struct {
-	rom32k_t     rom32k;
+	rom32k_t    rom32k;
 	cpu_t       cpu;
 	memory_t    memory;
 } computer_t;
@@ -984,24 +1034,19 @@ typedef struct {
 void computer_init(computer_t* computer)
 {
 	rom32k_init(&(computer->rom32k));
-	cpu_init(&(computer->cpu));
 	memory_init(&(computer->memory));
+	cpu_init(&(computer->cpu), &(computer->memory), &(computer->rom32k));	
 }
 
 void computer_run(computer_t* computer, bit_t reset)
 {
     bit16_t pc;
-    bit16_t instruction;
-    bit16_t in_m;
     bit16_t out_m;
     bit16_t addr_m;
     bit_t   wr_m;
 
-    pc = pc16_get_output(&(computer->cpu.pc16));
-    instruction = rom32k_get_output(&(computer->rom32k), &pc);
-    in_m = memory_get_output(&(computer->memory));
-
-    cpu_run(&(computer->cpu), &in_m, &instruction, reset, &out_m, &wr_m, &addr_m, &pc);
+    cpu_run(&(computer->cpu), reset);
+    cpu_get_outputs(&(computer->cpu), &out_m, &wr_m, &addr_m, &pc/*isn't used*/);
     memory_run(&(computer->memory), &out_m, wr_m, &addr_m);
 }
 
@@ -1587,6 +1632,14 @@ enum {
     VM_INSTRUCTION_FUNCTION         = 1,
     VM_INSTRUCTION_PUSH             = 2,
     VM_INSTRUCTION_LT               = 3,
+    VM_INSTRUCTION_IF_GOTO          = 4,
+    VM_INSTRUCTION_GOTO             = 5,
+    VM_INSTRUCTION_LABEL            = 6,
+    VM_INSTRUCTION_POP              = 7,
+    VM_INSTRUCTION_RETURN           = 8,
+    VM_INSTRUCTION_SUB              = 9,
+    VM_INSTRUCTION_CALL             = 10,
+    VM_INSTRUCTION_ADD              = 11,
 };
 
 struct {
@@ -1596,6 +1649,14 @@ struct {
     {"function",     VM_INSTRUCTION_FUNCTION},
     {"push",         VM_INSTRUCTION_PUSH},
     {"lt",           VM_INSTRUCTION_LT},
+    {"if-goto",      VM_INSTRUCTION_IF_GOTO},
+    {"goto",         VM_INSTRUCTION_GOTO},
+    {"label",        VM_INSTRUCTION_LABEL},
+    {"pop",          VM_INSTRUCTION_POP},
+    {"return",       VM_INSTRUCTION_RETURN},
+    {"sub",          VM_INSTRUCTION_SUB},
+    {"call",         VM_INSTRUCTION_CALL},
+    {"add",          VM_INSTRUCTION_ADD},
 };
 
 uint8_t vm_get_instruction_type(char* line, char** next)
@@ -1697,7 +1758,7 @@ int vm_write_pop_d_and_dec_sp(char* asm_lines)
 }
     
 
-int vm_write_push_reg(char* reg, uint16_t n, char* asm_lines)
+int vm_write_push_reg_index(char* reg, uint16_t n, char* asm_lines)
 {
     // *(*SP) = *(*(reg) + n)
     /// D = *(*(reg) + n)
@@ -1729,6 +1790,46 @@ int vm_write_push_reg(char* reg, uint16_t n, char* asm_lines)
     return 0;
 }
 
+int vm_write_pop_reg_index(char* reg, uint16_t n, char* asm_lines)
+{
+    // *(*(reg) + n) = *(*(SP - 1)); SP--
+    ////  R13 = *(reg) + n
+    if (n > 1) {
+        sprintf(asm_lines, 
+                    "@%u\n"
+                    "D=A\n", n);
+        asm_lines += strlen(asm_lines);
+    }
+    sprintf(asm_lines, 
+                    "@%s\n", reg);
+    asm_lines += strlen(asm_lines);
+    if (n == 0) {
+        sprintf(asm_lines, 
+                    "D=M\n");
+    }
+    else if (n == 1) {
+        sprintf(asm_lines, 
+                    "D=M+1\n");
+    }
+    else {
+        sprintf(asm_lines, 
+                    "D=D+M\n");
+    }
+    asm_lines += strlen(asm_lines);
+    sprintf(asm_lines, 
+                    "@R13\n"
+                    "M=D\n");
+    ////  D = *(SP-1); SP = SP-1
+    vm_write_pop_d_and_dec_sp(asm_lines + strlen(asm_lines));
+    asm_lines += strlen(asm_lines);
+    ////  *(R13) = D
+    sprintf(asm_lines, 
+                    "@R13\n"
+                    "A=M\n"
+                    "M=D\n");
+    return 0;
+}
+
 int vm_write_push(char* segment, char* literal, char* asm_lines)
 {
     uint16_t literal_num = (uint16_t)strtol(literal, NULL, 10);
@@ -1744,12 +1845,26 @@ int vm_write_push(char* segment, char* literal, char* asm_lines)
         return 0;
     }
     else if (!strcmp(segment, "argument")) {
-        if (vm_write_push_reg("ARG", literal_num, asm_lines) < 0)
+        if (vm_write_push_reg_index("ARG", literal_num, asm_lines) < 0)
             return -1;
         return 0;
     }
     
     printf("vm: - error push unknow segment %s\n", segment);
+    return -1; 
+}
+
+int vm_write_pop(char* segment, char* literal, char* asm_lines)
+{
+    uint16_t literal_num = (uint16_t)strtol(literal, NULL, 10);
+
+    if (!strcmp(segment, "argument")) {
+        if (vm_write_pop_reg_index("ARG", literal_num, asm_lines) < 0)
+            return -1;
+        return 0;
+    }
+    
+    printf("vm: - error pop unknow segment %s\n", segment);
     return -1; 
 }
 
@@ -1763,6 +1878,56 @@ int vm_write_function(char* label, char* literal, char* asm_lines)
         if (vm_write_push("constant", "0", (asm_lines + strlen(asm_lines))) < 0)
             return -1;
     }
+    return 0;
+}
+
+int vm_write_push_reg(char* reg, char* asm_lines)
+{
+    sprintf(asm_lines,
+                "@%s\n"
+                "D=M\n", reg);
+    vm_write_push_d_and_inc_sp(asm_lines + strlen(asm_lines));
+    return 0;
+}
+
+uint16_t s_returtn_number = 0;
+
+int vm_write_call(char* label, char* literal, char* asm_lines)
+{
+    int16_t n = (int16_t)strtol(literal, NULL, 10);
+
+    //push returnAddress	- (generate a label and pushes it to the stack)
+    sprintf(asm_lines,
+                "@%s$ret.%u\n"
+                "D=A\n", label, s_returtn_number);
+    vm_write_push_d_and_inc_sp(asm_lines + strlen(asm_lines));
+    
+    vm_write_push_reg("LCL", asm_lines + strlen(asm_lines));
+    vm_write_push_reg("ARG", asm_lines + strlen(asm_lines));
+    vm_write_push_reg("THIS", asm_lines + strlen(asm_lines));
+    vm_write_push_reg("THAT", asm_lines + strlen(asm_lines));
+
+    // ARG = SP - 5 - nArgs
+    sprintf(asm_lines + strlen(asm_lines),
+                "@%d\n"
+                "D=A\n"
+                "@SP\n"
+                "D=M-D\n"
+                "@ARG\n"
+                "M=D\n"
+                "@SP\n"
+                "D=M\n"
+                // LCL = SP
+                "@LCL\n"
+                "M=D\n",
+                n + 5);
+
+    // (return address)
+    sprintf(asm_lines + strlen(asm_lines),
+                "(%s$ret.%u)\n", label, s_returtn_number);
+
+    s_returtn_number++;
+
     return 0;
 }
 
@@ -1780,7 +1945,7 @@ int vm_write_compare(char* cmd, char* asm_lines)
                 "A=M-1\n"
                 "M=0\n"
                 "@%s_END_%u\n"
-                "0:JMP\n"
+                "0;JMP\n"
                 "(%s_TRUE_%u)\n"
                 "@SP\n"
                 "A=M-1\n"
@@ -1795,26 +1960,122 @@ int vm_write_compare(char* cmd, char* asm_lines)
     return 0;
 }
 
-int vm_write_asm(uint8_t instuction_type, char** next, char* asm_lines)
+int vm_write_goto(char* func_name, char* label, char* asm_lines)
+{
+    sprintf(asm_lines,
+                "@%s$%s\n"
+                "0;JMP\n",
+                func_name, label);
+    return 0;
+}
+
+int vm_write_if_goto(char* func_name, char* label, char* asm_lines)
+{
+    vm_write_pop_d_and_dec_sp(asm_lines);
+    sprintf(asm_lines + strlen(asm_lines),
+                "@%s$%s\n"
+                "D;JNE\n",
+                func_name, label);
+    return 0;
+}
+
+int vm_write_binary_operator(char* operation, char* asm_lines)
+{
+    /// D = *(SP-1); SP = SP-1
+    vm_write_pop_d_and_dec_sp(asm_lines);
+    sprintf(asm_lines + strlen(asm_lines),
+                "A=A-1\n"
+                "M=D%sM\n",
+                operation);
+    return 0;
+}
+
+int vm_write_label(char* func_name, char* label, char* asm_lines)
+{
+    sprintf(asm_lines,
+                "(%s$%s)\n",
+                func_name, label);
+    return 0;
+}
+
+int vm_write_return(char* asm_lines)
+{
+    sprintf(asm_lines,
+                // local frame = LCL
+                "@LCL\n"
+                "D=M\n"
+                "@R14\n"
+                "M=D\n"
+                // local retAddr = *(frame-5)
+                "@5\n"
+                "D=A\n"
+                "@R14\n"
+                "A=M-D\n"
+                "@R15\n"
+                "M=D\n");
+    //pop argument 0
+    if (vm_write_pop_reg_index("ARG", 0, asm_lines + strlen(asm_lines)) < 0)
+            return -1;
+    asm_lines += strlen(asm_lines);
+    sprintf(asm_lines,
+                // SP = ARG+1
+                "@ARG\n"
+                "D=M+1\n"
+                "@SP\n"
+                "M=D\n"
+                // THAT = *(--frame))
+                "@R14\n"
+                "AM=M-1\n"
+                "D=M\n"
+                "@THAT\n"
+                "M=D\n"
+                // THIS = *(--frame)
+                "@R14\n"
+                "AM=M-1\n"
+                "D=M\n"
+                "@THIS\n"
+                "M=D\n"
+                // ARG = *(--frame))
+                "@R14\n"
+                "AM=M-1\n"
+                "D=M\n"
+                "@ARG\n"
+                "M=D\n"
+                // LCL = *(--frame))
+                "@R14\n"
+                "AM=M-1\n"
+                "D=M\n"
+                "@LCL\n"
+                "M=D\n"
+                // goto retAddr
+                "@R15\n"
+                "A=M\n"
+                "0;JMP\n");
+    return 0;
+}
+
+int vm_write_asm(uint8_t instruction_type, char** next, char* func_name, char* asm_lines)
 {
     char label[ASM_SYMBOL_MAX_LEN+1];
     char literal[ASM_LITERAL_MAX_LEN+1];
 
-    if (instuction_type == VM_INSTRUCTION_FUNCTION) {
+    if (instruction_type == VM_INSTRUCTION_FUNCTION) {
         *next = vm_get_label_line(*next, label);
         if (*next == NULL)
             return -1;
         printf("vm: function name = %s, next = <%s>\n", label, *next);
+
+        strcpy(func_name, label);
         
         *next = vm_get_literal(*next, literal);
         if (*next == NULL)
             return -1;
-        printf("vm: function n args = %s, next = <%s>\n", literal, *next);
+        printf("vm: function n param = %s, next = <%s>\n", literal, *next);
 
         if (vm_write_function(label, literal, asm_lines) < 0)
             return -1;
     }
-    if (instuction_type == VM_INSTRUCTION_PUSH) {
+    if (instruction_type == VM_INSTRUCTION_PUSH) {
         *next = vm_get_label_line(*next, label);
         if (*next == NULL)
             return -1;
@@ -1828,8 +2089,75 @@ int vm_write_asm(uint8_t instuction_type, char** next, char* asm_lines)
         if (vm_write_push(label, literal, asm_lines) < 0)
             return -1;
     }
-    if (instuction_type == VM_INSTRUCTION_LT) {
-        vm_write_compare("lt", asm_lines);
+    if (instruction_type == VM_INSTRUCTION_LT) {
+        vm_write_compare("LT", asm_lines);
+    }
+    if (instruction_type == VM_INSTRUCTION_IF_GOTO) {
+        *next = vm_get_label_line(*next, label);
+        if (*next == NULL)
+            return -1;
+        printf("vm: if-goto label = %s, next = <%s>\n", label, *next);
+
+        if (vm_write_if_goto(func_name, label, asm_lines) < 0)
+            return -1;
+    }
+    if (instruction_type == VM_INSTRUCTION_GOTO) {
+        *next = vm_get_label_line(*next, label);
+        if (*next == NULL)
+            return -1;
+        printf("vm: goto label = %s, next = <%s>\n", label, *next);
+
+        if (vm_write_goto(func_name, label, asm_lines) < 0)
+            return -1;
+    }
+    if (instruction_type == VM_INSTRUCTION_LABEL) {
+        *next = vm_get_label_line(*next, label);
+        if (*next == NULL)
+            return -1;
+        printf("vm: label = %s, next = <%s>\n", label, *next);
+
+        if (vm_write_label(func_name, label, asm_lines) < 0)
+            return -1;
+    }
+    if (instruction_type == VM_INSTRUCTION_POP) {
+        *next = vm_get_label_line(*next, label);
+        if (*next == NULL)
+            return -1;
+        printf("vm: pop segment = %s, next = <%s>\n", label, *next);
+        
+        *next = vm_get_literal(*next, literal);
+        if (*next == NULL)
+            return -1;
+        printf("vm: pop n = %s, next = <%s>\n", literal, *next);
+
+        if (vm_write_pop(label, literal, asm_lines) < 0)
+            return -1;
+    }
+    if (instruction_type == VM_INSTRUCTION_RETURN) {
+        if (vm_write_return(asm_lines) < 0)
+            return -1;
+    }
+    if (instruction_type == VM_INSTRUCTION_SUB) {
+        if (vm_write_binary_operator("-", asm_lines) < 0)
+            return -1;
+    }
+    if (instruction_type == VM_INSTRUCTION_ADD) {
+        if (vm_write_binary_operator("+", asm_lines) < 0)
+            return -1;
+    }
+    if (instruction_type == VM_INSTRUCTION_CALL) {
+        *next = vm_get_label_line(*next, label);
+        if (*next == NULL)
+            return -1;
+        printf("vm: call function name = %s, next = <%s>\n", label, *next);
+
+        *next = vm_get_literal(*next, literal);
+        if (*next == NULL)
+            return -1;
+        printf("vm: call function n args = %s, next = <%s>\n", literal, *next);
+
+        if (vm_write_call(label, literal, asm_lines) < 0)
+            return -1;
     }
 
     return 0;
@@ -1861,12 +2189,17 @@ int vm_translate(char* vm_file_name, uint8_t out_format, char* out_file_name)
     #define VM_ASM_LINES_MAX 2048
     char asm_lines[VM_ASM_LINES_MAX+1];
 
+    char func_name[ASM_SYMBOL_MAX_LEN+1] = "";
+
     if (out_format == VM_OUT_FORMAT_ASM) {
           sprintf(asm_lines, "// asm: bootstrap\n"
+                             "/// SP = 256\n"
                              "@256\n"
                              "D=A\n"
                              "@SP\n"
-                             "M=D\n");
+                             "M=D\n"
+                             "/// call function Sys.Init 0\n");
+          vm_write_call("Sys.Init", "0", asm_lines + strlen(asm_lines));
           fwrite(asm_lines, 1, strlen(asm_lines), out_file);
     }
 
@@ -1906,7 +2239,7 @@ int vm_translate(char* vm_file_name, uint8_t out_format, char* out_file_name)
 
         n++;
 
-        if (vm_write_asm(instruction_type, &next, asm_lines) < 0) {
+        if (vm_write_asm(instruction_type, &next, func_name, asm_lines) < 0) {
             break;
         }
         if (out_format == VM_OUT_FORMAT_ASM) {
@@ -2387,14 +2720,9 @@ int main()
 	
 	
 	{
-		bit16_t instruction, in_m;
 		bit_t reset = 0;
-		bit16_t out_m, addr_m, pc;
-		bit_t wr_m;
-		cpu_t cpu;
 		
 	    num_dff = 0; num_not = 0; num_or = 0; num_and = 0;
-		cpu_init(&cpu);
 
 		char str1[BIT16_SIZE];
 		char str2[BIT16_SIZE];
@@ -2403,7 +2731,6 @@ int main()
 		char str5[BIT16_SIZE];
 		char str_instruction[INSTRUCTION_SIZE];
 
-	        cpu_debug = 1;
 	        memory_debug = 1;
 	        screen_debug = 1;
 
