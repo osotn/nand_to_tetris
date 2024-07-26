@@ -1045,8 +1045,11 @@ void computer_run(computer_t* computer, bit_t reset)
     bit16_t addr_m;
     bit_t   wr_m;
 
-    cpu_run(&(computer->cpu), reset);
+    // Get outputs
     cpu_get_outputs(&(computer->cpu), &out_m, &wr_m, &addr_m, &pc/*isn't used*/);
+
+    // Run
+    cpu_run(&(computer->cpu), reset);
     memory_run(&(computer->memory), &out_m, wr_m, &addr_m);
 }
 
@@ -1555,7 +1558,9 @@ int asm_translate(char* asm_file_name, uint8_t out_format, asm_symbol_tbl_t* sym
         int i;
         for (i = 0; i < symbol_tbl->n; i++) {
             char asm_comment[ASM_LINE_MAX_LEN+1] = {'\0'};
-            sprintf(asm_comment, "// ASM: stbl %d. %s = %d\n", i, symbol_tbl->symbols[i].symbol_name, symbol_tbl->symbols[i].symbol_value);
+            sprintf(asm_comment, "// ASM: stbl %d. %s = %d (0x%.4x)\n", i,
+                    symbol_tbl->symbols[i].symbol_name, symbol_tbl->symbols[i].symbol_value,
+                    symbol_tbl->symbols[i].symbol_value);
             fwrite(asm_comment, 1, strlen(asm_comment), out_file);
         }
     }
@@ -1921,6 +1926,11 @@ int vm_write_call(char* label, char* literal, char* asm_lines)
                 "@LCL\n"
                 "M=D\n",
                 n + 5);
+                
+    // goto f
+    sprintf(asm_lines + strlen(asm_lines),
+                "@%s\n"
+                "0;JMP\n", label);
 
     // (return address)
     sprintf(asm_lines + strlen(asm_lines),
@@ -1981,12 +1991,17 @@ int vm_write_if_goto(char* func_name, char* label, char* asm_lines)
 
 int vm_write_binary_operator(char* operation, char* asm_lines)
 {
+    char comp[] = "X*Y";
+
+    sprintf(comp, (!strcmp(operation, "-")) ? "M%sD" : "D%sM", operation);
+
     /// D = *(SP-1); SP = SP-1
     vm_write_pop_d_and_dec_sp(asm_lines);
     sprintf(asm_lines + strlen(asm_lines),
                 "A=A-1\n"
-                "M=D%sM\n",
-                operation);
+                "M=%s\n",
+                comp);
+
     return 0;
 }
 
@@ -2011,6 +2026,7 @@ int vm_write_return(char* asm_lines)
                 "D=A\n"
                 "@R14\n"
                 "A=M-D\n"
+                "D=M\n"
                 "@R15\n"
                 "M=D\n");
     //pop argument 0
@@ -2198,8 +2214,8 @@ int vm_translate(char* vm_file_name, uint8_t out_format, char* out_file_name)
                              "D=A\n"
                              "@SP\n"
                              "M=D\n"
-                             "/// call function Sys.Init 0\n");
-          vm_write_call("Sys.Init", "0", asm_lines + strlen(asm_lines));
+                             "/// call function Sys.init 0\n");
+          vm_write_call("Sys.init", "0", asm_lines + strlen(asm_lines));
           fwrite(asm_lines, 1, strlen(asm_lines), out_file);
     }
 
@@ -2233,7 +2249,7 @@ int vm_translate(char* vm_file_name, uint8_t out_format, char* out_file_name)
 
         if (out_format == VM_OUT_FORMAT_ASM) {
             char str_comment[VM_LINE_MAX_LEN+1+256];
-            sprintf(str_comment, "// vm: line %d <%s>\n", n, strip_line);
+            sprintf(str_comment, "// vm: line %d <%s>\n($vm.line.%u)\n", n, strip_line, n);
             fwrite(str_comment, 1, strlen(str_comment), out_file);
         }
 
@@ -2245,40 +2261,6 @@ int vm_translate(char* vm_file_name, uint8_t out_format, char* out_file_name)
         if (out_format == VM_OUT_FORMAT_ASM) {
           fwrite(asm_lines, 1, strlen(asm_lines), out_file);
         }
-        
-
-#if 0
-
-
-        uint16_t code;
-        if (asm_decode(symbol_tbl, strip_line, instruction_type, &code) < 0)
-            break;
-        char binary_str[16+1+1];
-        uint16_t u = code;
-        int i;
-        for (i=0; i<16; i++) {
-            binary_str[16-1-i] =  (u & 0x01) ? '1' : '0';
-            u >>= 1;
-        }
-        binary_str[16] = '\n';
-        binary_str[17] = '\0';
-
-        if (out_format == ASM_OUT_FORMAT_BIN) {
-            fwrite(binary_str, 1, strlen(binary_str), out_file);
-        }
-    }
-    
-    if (out_format == ASM_OUT_FORMAT_SYMBOLS) {
-        asm_set_variable_addr_symbol_tbl(symbol_tbl);
-
-        int i;
-        for (i = 0; i < symbol_tbl->n; i++) {
-            char asm_comment[ASM_LINE_MAX_LEN+1] = {'\0'};
-            sprintf(asm_comment, "// ASM: stbl %d. %s = %d\n", i, symbol_tbl->symbols[i].symbol_name, symbol_tbl->symbols[i].symbol_value);
-            fwrite(asm_comment, 1, strlen(asm_comment), out_file);
-        }
-    }
-#endif
     }
 
     fclose(vm_file);
@@ -2286,6 +2268,2030 @@ int vm_translate(char* vm_file_name, uint8_t out_format, char* out_file_name)
     return 0;
 }
 
+enum {
+    COMPILER_OUT_FORMAT_STRIP      = 1,
+    COMPILER_OUT_FORMAT_XML_TOKENS = 2,
+    COMPILER_OUT_FORMAT_XML_PARSER = 3,
+};
+
+#define COMPILER_LINE_MAX_LEN 1024
+
+int compiler_strip_line(char* line, uint8_t* is_in_comment, char* strip_line)
+{
+    char strip_vm_line[COMPILER_LINE_MAX_LEN+1];
+    vm_strip_line(line, strip_vm_line);
+    printf("compiler: vm_strip_line <%s> len = %u\n", strip_vm_line, (unsigned)strlen(strip_vm_line));
+
+
+    int i = 0;
+    int j = 0;
+    uint8_t c;
+
+    while ((c = strip_vm_line[i]) != '\0') {
+        if (*is_in_comment) {
+            if (c == '*' && strip_vm_line[i+1] == '/') {
+                if (!(*is_in_comment))
+                    return -1;
+                *is_in_comment = 0;
+                i++;
+            }
+            i++;
+            continue;
+        }
+
+        if (c == '/' && strip_vm_line[i+1] == '*') {
+            *is_in_comment = 1;
+            i+=2;
+            continue;
+        }
+
+        strip_line[j++] = strip_vm_line[i++];
+    }
+    strip_line[j] = '\0';
+    return 0;
+}
+
+uint8_t compiler_symbols[] = {
+    '{', '}', '(', ')', '[', ']', '.', ',', ';',
+    '+', '-', '*', '/', '&', '|', '<', '>', '=', '~'
+};
+
+int compiler_is_symbol(uint8_t c) {
+    int i;
+    for (i = 0; i < AR_SIZEOF(compiler_symbols); i++) {
+        if (c == compiler_symbols[i])
+            return 1;
+    }
+    return 0;
+}
+
+int compiler_get_token(char** line, char* token)
+{
+    uint8_t is_in_str_literal = 0;
+    int i = 0;
+    int j = 0;
+    uint8_t c;
+    while((c=(*line)[i]) != '\0') {
+        if (c == '\"') {
+            if (is_in_str_literal) {
+                token[j++];
+                i++;
+                break;
+            }
+            is_in_str_literal = 1;
+        }
+        else if (is_in_str_literal) {
+            // nothing
+        }
+        else if (c == ' ') {
+            if (j == 0) {
+                printf("compiler: empty token\n");
+                return -1;
+            }
+            i++;
+            break;
+        }
+        else if (compiler_is_symbol(c)) {
+            if (j == 0) {
+                token[j++] = c;
+                i++;
+                if ((*line)[i] == ' ')
+                    i++;
+            }
+            break;
+        }
+        else if (!isalpha(c) && !isdigit(c) && c != '_') {
+            printf("compiler: unknow symbol %c\n", c);
+            return -1;
+        }
+        token[j++] = c;
+        i++;
+    }
+    token[j] = '\0';
+    *line += i;
+    return 0;
+}
+
+int compiler_is_string_const(char* token)
+{
+    if (strlen(token) == 0) 
+        return 0;
+
+    return (token[0] == '\"') ? 1 : 0;
+}
+
+void compiler_skip_string_quotes(char* token)
+{
+    int len = strlen(token);
+    if (len <= 2) {
+        token[0] = '\0';
+    }
+        
+    int i;
+    for (i = 1; i < len; i++)
+        token[i-1] = token[i];
+    token[len-2] = '\0';
+}
+
+int compiler_is_int_const(char* token)
+{
+    if (strlen(token) == 0) 
+        return 0;
+
+    int i = 0;
+    uint8_t c;
+    while((c=token[i++]) != '\0') {
+        if (!isdigit(c))
+           return 0;
+    }
+    return 1;
+}
+
+int compiler_is_identifier(char* token)
+{
+    if (strlen(token) == 0) 
+        return 0;
+
+    if (isdigit(token[0]))
+        return 0;
+
+    int i = 0;
+    uint8_t c;
+    while((c=token[i++]) != '\0') {
+        if (!isdigit(c) && !isalpha(c) && (c != '_'))
+           return 0;
+    }
+    return 1;
+}
+
+enum {
+    COMPILER_KEYWORD_CLASS           = 0,
+    COMPILER_KEYWORD_CONSTRUCTOR     = 1,
+    COMPILER_KEYWORD_FUNCTION        = 2,
+    COMPILER_KEYWORD_METHOD          = 3,
+    COMPILER_KEYWORD_FIELD           = 4,
+    COMPILER_KEYWORD_STATIC          = 5,
+    COMPILER_KEYWORD_VAR             = 6,
+    COMPILER_KEYWORD_INT             = 7,
+    COMPILER_KEYWORD_CHAR            = 8,
+    COMPILER_KEYWORD_BOOLEAN         = 9,
+    COMPILER_KEYWORD_VOID            = 10,
+    COMPILER_KEYWORD_TRUE            = 11,
+    COMPILER_KEYWORD_FALSE           = 12,
+    COMPILER_KEYWORD_NULL            = 13,
+    COMPILER_KEYWORD_THIS            = 14,
+    COMPILER_KEYWORD_LET             = 15,
+    COMPILER_KEYWORD_DO              = 16,
+    COMPILER_KEYWORD_IF              = 17,
+    COMPILER_KEYWORD_ELSE            = 18,
+    COMPILER_KEYWORD_WHILE           = 19,
+    COMPILER_KEYWORD_RETURN          = 20,
+};
+
+char* compiler_keywords[] = {
+    "class",
+    "constructor",
+    "function",
+    "method",
+    "field",
+    "static",
+    "var",
+    "int",
+    "char",
+    "boolean",
+    "void",
+    "true",
+    "false",
+    "null",
+    "this",
+    "let",
+    "do",
+    "if",
+    "else",
+    "while",
+    "return",
+};
+
+int compiler_is_keyword(char* token)
+{
+    int i = 0;
+    for (i = 0; i < AR_SIZEOF(compiler_keywords); i++) {
+        if (!strcmp(token, compiler_keywords[i]))
+            return 1;
+    }
+    return 0;
+}
+
+uint8_t compiler_get_keyword_type(char*  token) {
+    int i = 0;
+    for (i = 0; i < AR_SIZEOF(compiler_keywords); i++) {
+        if (!strcmp(token, compiler_keywords[i]))
+            return (uint8_t)i;
+    }
+    return (uint8_t)i;
+}
+
+enum {
+    COMPILER_TOKEN_NAME_UNKNOWN      = 0,
+    COMPILER_TOKEN_NAME_KEYWORD      = 1,
+    COMPILER_TOKEN_NAME_SYMBOL       = 2,
+    COMPILER_TOKEN_NAME_IDENTIFIER   = 3,
+    COMPILER_TOKEN_NAME_INT_CONST    = 4,
+    COMPILER_TOKEN_NAME_STRING_CONST = 5,
+    COMPILER_TOKEN_NAME_END
+};
+char* compiler_token_name[] = {
+    "unknown",   // COMPILER_TOKEN_NAME_UNKNOWN
+    "keyword",
+    "symbol",
+    "identifier",
+    "intConst",
+    "stringConst",
+};
+
+#define COMPILER_TOKEN_MAX_NUM 1024
+#define COMPILER_TOKEN_MAX_LEN 1024
+typedef struct {
+    uint8_t     type;
+    char        token[COMPILER_TOKEN_MAX_LEN+1];
+} token_t;
+
+typedef struct {
+    token_t tokens[COMPILER_TOKEN_MAX_NUM];
+    int     num;
+} tokens_t;
+
+void compiler_init_tokens(tokens_t* tokens) {
+    tokens->num = 0;
+}
+
+int compiler_add_to_tokens(tokens_t* tokens, uint8_t type, char* token) {
+    int i = tokens->num;
+
+    if (i >= COMPILER_TOKEN_MAX_NUM)
+        return -1;
+
+    tokens->tokens[i].type = type;
+    strcpy(tokens->tokens[i].token, token);
+
+    ++(tokens->num);
+    return 0;
+}
+
+token_t* compiler_get_token(tokens_t* tokens, int n) {
+    if (n >= tokens->num)
+        return NULL;
+
+    return &(tokens->tokens[n]);
+}
+
+uint8_t compiler_get_token_type(char* token) {
+    uint8_t token_type = COMPILER_TOKEN_NAME_UNKNOWN;
+
+    if (strlen(token) == 1 && compiler_is_symbol(token[0]))
+        token_type = COMPILER_TOKEN_NAME_SYMBOL;
+    else if (compiler_is_int_const(token))
+        token_type = COMPILER_TOKEN_NAME_INT_CONST;
+    else if (compiler_is_string_const(token))
+        token_type = COMPILER_TOKEN_NAME_STRING_CONST;
+    else if (compiler_is_keyword(token))
+        token_type = COMPILER_TOKEN_NAME_KEYWORD;
+    else if (compiler_is_identifier(token))
+        token_type = COMPILER_TOKEN_NAME_IDENTIFIER;
+    
+    return token_type;
+}
+
+void compiler_xml_print_start_tag(char* tag, int n_tabs, FILE* out_file) {
+
+    char token_line[1024+1];
+    int i;
+    //
+    token_line[0] = '\0';
+    for (i = 0; i < n_tabs; i++)
+        strcat(token_line, "    ");
+    strcat(token_line, "<");
+    strcat(token_line, tag);
+    strcat(token_line, ">\n");
+    fprintf(out_file, "%s", token_line);
+}
+
+void compiler_xml_print_end_tag(char* tag, int n_tabs, FILE* out_file) {
+
+    char token_line[1024+1];
+    int i;
+    //
+    token_line[0] = '\0';
+    for (i = 0; i < n_tabs; i++)
+        strcat(token_line, "    ");
+    strcat(token_line, "</");
+    strcat(token_line, tag);
+    strcat(token_line, ">\n");
+    fprintf(out_file, "%s", token_line);
+}
+
+void compiler_xml_print_token(token_t* token, int n_tabs, FILE* out_file)
+{
+    char token_line[1024+1];
+    int i;
+    //
+    token_line[0] = '\0';
+    for (i = 0; i < n_tabs; i++)
+        strcat(token_line, "    ");
+    strcat(token_line, "<");
+    strcat(token_line, compiler_token_name[token->type]);
+    strcat(token_line, "> ");
+    strcat(token_line, (!strcmp(token->token, "<")) ? "&lt;" : token->token);
+    strcat(token_line, " </");
+    strcat(token_line, compiler_token_name[token->type]);
+    strcat(token_line, ">\n");
+    //
+    fprintf(out_file, "%s", token_line);
+}
+
+int compiler_parse_is_class_var_dec(tokens_t* tokens, int* n)
+{
+    token_t* token = compiler_get_token(tokens, *n);
+
+    if (token == NULL)
+        return 0;
+
+    if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+           (COMPILER_KEYWORD_STATIC == compiler_get_keyword_type(token->token) ||
+            COMPILER_KEYWORD_FIELD == compiler_get_keyword_type(token->token))) {
+            return 1;
+    }
+
+    return 0;
+}
+
+int compiler_parse_type(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // type: int | char | boolean | className
+
+    token_t* token = compiler_get_token(tokens, *n);
+
+    if (token == NULL) {
+        printf("compiler - err parser type expected type\n");
+        return -1;
+    }
+
+    if (COMPILER_TOKEN_NAME_KEYWORD == token->type) {
+        if (COMPILER_KEYWORD_INT == compiler_get_keyword_type(token->token) ||
+             COMPILER_KEYWORD_CHAR == compiler_get_keyword_type(token->token) ||
+             COMPILER_KEYWORD_BOOLEAN == compiler_get_keyword_type(token->token)) {
+            // nothing
+         }
+         else {
+             printf("compiler - err parser type expected keyword int | char | boolean or className\n");
+             return -1;
+         }
+    } else if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+        // nothing
+    }
+    else {
+        printf("compiler - err parser type expected int | char | boolean or className\n");
+        return -1;
+    }
+
+    compiler_xml_print_token(token, n_tabs, out_file);
+    (*n)++;
+    return 0;
+}
+
+int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // classVarDec: ('static' | 'field') type varName (',' varName)* ';'
+    enum {
+        state_class_var_dec_keyword           = 0,
+        state_class_var_dec_type              = 1,
+        state_class_var_dec_name              = 2,
+        state_class_var_dec_next_name         = 3,
+        state_class_var_dec_end               = 4
+    }
+    state = state_class_var_dec_keyword;
+
+    compiler_xml_print_start_tag("classVarDec", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_class_var_dec_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                        (COMPILER_KEYWORD_STATIC == compiler_get_keyword_type(token->token) ||
+                         COMPILER_KEYWORD_FIELD == compiler_get_keyword_type(token->token))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_class_var_dec_type;
+                }
+                else {
+                    printf("compiler - err parser class var dec expected static | field keywords\n");
+                    is_break = 1;
+                }
+                break;
+
+            case state_class_var_dec_type:
+                if (compiler_parse_type(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_class_var_dec_name;
+                break;
+
+            case state_class_var_dec_name:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_class_var_dec_next_name;
+                }
+                else {
+                    printf("compiler - err parser class ver dec expected name\n");
+                    return -1;
+                }
+                break;
+
+            case state_class_var_dec_next_name:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type) {
+                    if (!strcmp(token->token, ";")) {
+                        //
+                        compiler_xml_print_token(token, n_tabs+1, out_file);
+                        //
+                        is_break = 1;
+                        state = state_class_var_dec_end;
+                    }
+                    else if (!strcmp(token->token, ",")) {
+                        //
+                        compiler_xml_print_token(token, n_tabs+1, out_file);
+                        //
+                        state = state_class_var_dec_name;
+                    }
+                    else {
+                        printf("compiler - err parser class ver dec expected symbols <,> or <;> after name\n");
+                        return -1;
+                    }
+                }
+                else {
+                    printf("compiler - err parser class ver dec expected symbols <,> or <;> after name\n");
+                    return -1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_class_var_dec_end) {
+        printf("compiler: -err parser class var dec not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("classVarDec", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_param_list(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // classVarDec: ((type varName) (',' (type varName)))?
+    enum {
+        state_param_list_type           = 0,
+        state_param_list_var_name       = 1,
+        state_param_list_next           = 2,
+        state_param_list_end            = 3
+    }
+    state = state_param_list_type;
+
+    compiler_xml_print_start_tag("parameterList", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_param_list_type:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, ")")) {
+                    // No params
+                    (*n)--;
+                    state = state_param_list_end;
+                    is_break = 1;
+                }
+                else {
+                    // TODO
+                }
+                break;
+                
+                // TODO
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_param_list_end) {
+        printf("compiler: -err parser param list not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("parameterList", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_is_var_dec(tokens_t* tokens, int* n)
+{
+    token_t* token = compiler_get_token(tokens, *n);
+
+    if (token == NULL)
+        return 0;
+
+    if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+        COMPILER_KEYWORD_VAR == compiler_get_keyword_type(token->token)) {
+            return 1;
+    }
+
+    return 0;
+}
+
+// TODO to top declaration
+int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* out_file);
+
+int compiler_parse_term(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // term: varName | subroutineCall
+    enum {
+        state_term          = 0,
+        state_term_end           = 1
+    }
+    state = state_term;
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_term:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    token_t* next_token = compiler_get_token(tokens, (*n)+1);
+                    if (next_token != NULL &&
+                            (COMPILER_TOKEN_NAME_SYMBOL == next_token->type &&
+                             (!strcmp(next_token->token, ".")))) {
+                        //
+                        if (compiler_parse_subroutine_call(tokens, n, n_tabs, out_file) < 0) {
+                            return -1;
+                        }
+                        //
+                        (*n)--;
+                    }
+                    else {
+                        compiler_xml_print_token(token, n_tabs, out_file);
+                        //
+                    }
+                    is_break = 1;
+                    state = state_term_end;
+                }
+                else {
+                    printf("compiler - err parser term expected name\n");
+                    return -1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_term_end) {
+        printf("compiler: -err parser term not finish, state = %d\n", state);
+        return -1;
+    }
+
+    return 0;
+}
+
+int compiler_parse_expression(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // expression: term (op term)*
+    enum {
+        state_expression_term          = 0,
+        state_expression_op            = 1,
+        state_expression_end           = 2
+    }
+    state = state_expression_term;
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+           case state_expression_term:
+                if (compiler_parse_term(tokens, n, n_tabs, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_expression_op;
+                break;
+
+            case state_expression_op:
+                if (0 /*compiler_parse_is_op(tokens, n) < 0)*/) {
+                    // TODO
+                    (*n)--;
+                    state = state_expression_term;
+                }
+                else {
+                    (*n)--;
+                    state = state_expression_end;
+                    is_break = 1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_expression_end) {
+        printf("compiler: -err parser expression not finish, state = %d\n", state);
+        return -1;
+    }
+
+    return 0;
+}
+
+int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // varDec: 'var' type varName (',' varName)* ';'
+    enum {
+        state_var_dec_keyword           = 0,
+        state_var_dec_type              = 1,
+        state_var_dec_name              = 2,
+        state_var_dec_next              = 3,
+        state_var_dec_end               = 4
+    }
+    state = state_var_dec_keyword;
+
+    compiler_xml_print_start_tag("varDec", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_var_dec_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_VAR == compiler_get_keyword_type(token->token)) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_var_dec_type;
+                }
+                else {
+                    printf("compiler - err parser var dec expected var keyword\n");
+                    is_break = 1;
+                }
+                break;
+
+           case state_var_dec_type:
+                if (compiler_parse_type(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_var_dec_name;
+                break;
+
+            case state_var_dec_name:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_var_dec_next;
+                }
+                else {
+                    printf("compiler - err parser var dec expected name\n");
+                    is_break = 1;
+                }
+                break;
+
+            case state_var_dec_next:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type) {
+                    if (!strcmp(token->token, ";")) {
+                        state = state_var_dec_end;
+                        is_break = 1;
+                    }
+                    else if (!strcmp(token->token, ",")) {
+                        state = state_var_dec_name;
+                    }
+                    else {
+                        printf("compiler - err parser type unexpected symbol %s\n", token->token);
+                        return -1;
+                    }
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                }
+                else {
+                    printf("compiler - err parser type expected symbol <;> or <,>\n");
+                    return -1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_var_dec_end) {
+        printf("compiler: -err parser var dec not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("varDec", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_expression_list(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // expressionList: (expression (',' expression)*)?
+    // TODO
+    enum {
+        state_expression_list_close_parent      = 0,
+        state_expression_list_end               = 7
+    }
+    state = state_expression_list_close_parent;
+
+    compiler_xml_print_start_tag("expressionList", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_expression_list_close_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, ")")) {
+                    //
+                    (*n)--;
+                    is_break = 1;
+                    state = state_expression_list_end;
+                }
+                else {
+                    // TODO
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_expression_list_end) {
+        printf("compiler: -err parser expressioin list not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("expressionList", n_tabs, out_file);
+
+    return 0;
+}
+
+int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // subroutineCall: subroutineName '(' parameterList ')' | (className | varName) '.' subroutineName '(' expressionList ')'
+    enum {
+        state_subroutine_call_name1             = 0,
+        state_subroutine_call_dot               = 1,
+        state_subroutine_call_name2             = 2,
+        state_subroutine_call_start_parent      = 3,
+        state_subroutine_call_expression_list   = 4,
+        state_subroutine_call_close_parent      = 5,
+        state_subroutine_call_end               = 7
+    }
+    state = state_subroutine_call_name1;
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_subroutine_call_name1:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    compiler_xml_print_token(token, n_tabs, out_file);
+                    //
+                    state = state_subroutine_call_dot;
+                }
+                else {
+                    printf("compiler - err parser subroutine call expected subroutine or calls name\n");
+                    return -1;
+                }
+                break;
+
+            case state_subroutine_call_dot:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, ".")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs, out_file);
+                    //
+                    state = state_subroutine_call_name2;
+                }
+                else {
+                    (*n)--;
+                    state = state_subroutine_call_start_parent;
+                }
+                break;
+
+           case state_subroutine_call_name2:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    compiler_xml_print_token(token, n_tabs, out_file);
+                    //
+                    state = state_subroutine_call_start_parent;
+                }
+                else {
+                    printf("compiler - err parser subroutine call expected subroutine name\n");
+                    return -1;
+                }
+                break;
+
+            case state_subroutine_call_start_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, "(")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs, out_file);
+                    //
+                    state = state_subroutine_call_expression_list;
+                }
+                else {
+                    printf("compiler - err parser subroutine call expected symbol <(>\n");
+                    return -1;
+                }
+                break;
+
+           case state_subroutine_call_expression_list:
+                if (compiler_parse_expression_list(tokens, n, n_tabs, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_subroutine_call_close_parent;
+                break;
+
+            case state_subroutine_call_close_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, ")")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs, out_file);
+                    //
+                    is_break = 1;
+                    state = state_subroutine_call_end;
+                }
+                else {
+                    printf("compiler - err parser subroutine call expected symbol <)>\n");
+                    return -1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_subroutine_call_end) {
+        printf("compiler: -err parser subroutine call not finish, state = %d\n", state);
+        return -1;
+    }
+
+    return 0;
+}
+
+int compiler_parse_is_statement(tokens_t* tokens, int* n)
+{
+    token_t* token = compiler_get_token(tokens, *n);
+
+    if (token == NULL)
+        return 0;
+
+    if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+            (COMPILER_KEYWORD_LET == compiler_get_keyword_type(token->token) ||
+             COMPILER_KEYWORD_IF == compiler_get_keyword_type(token->token) ||
+             COMPILER_KEYWORD_WHILE == compiler_get_keyword_type(token->token) ||
+             COMPILER_KEYWORD_DO == compiler_get_keyword_type(token->token) ||
+             COMPILER_KEYWORD_RETURN == compiler_get_keyword_type(token->token))) {
+            return 1;
+    }
+
+    return 0;
+}
+
+
+int compiler_parse_return_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // returnStatement: 'return' expression? ';'
+    enum {
+        state_return_statement_keyword          = 0,
+        state_return_statement_expression       = 1,
+        state_return_statement_terminator       = 2,
+        state_return_statement_end              = 3
+    }
+    state = state_return_statement_keyword;
+
+    compiler_xml_print_start_tag("returnStatement", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_return_statement_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_RETURN == compiler_get_keyword_type(token->token)) {
+                    
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    state = state_return_statement_expression;
+                }
+                else {
+                    return -1;
+                }
+                break;
+
+            case state_return_statement_expression:
+               if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, ";"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    is_break = 1;
+                    state = state_return_statement_end;
+                }
+                else {
+                    if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                        return -1;
+                    }
+                    (*n)--;
+                    state = state_return_statement_terminator;
+                }
+                break;
+                
+            case state_return_statement_terminator:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, ";"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    is_break = 1;
+                    state = state_return_statement_end;
+                }
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_return_statement_end) {
+        printf("compiler: -err parser return statement not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("returnStatement", n_tabs, out_file);
+    return 0;
+}
+
+
+
+int compiler_parse_do_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // doStatement: 'do' subroutineCall ';'
+    enum {
+        state_do_statement_keyword          = 0,
+        state_do_statement_subroutine_call  = 1,
+        state_do_statement_terminator       = 2,
+        state_do_statement_end              = 3
+    }
+    state = state_do_statement_keyword;
+
+    compiler_xml_print_start_tag("doStatement", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_do_statement_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_DO == compiler_get_keyword_type(token->token)) {
+                    
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    state = state_do_statement_subroutine_call;
+                }
+                else {
+                    return -1;
+                }
+                break;
+
+            case state_do_statement_subroutine_call:
+                if (compiler_parse_subroutine_call(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_do_statement_terminator;
+                break;
+
+            case state_do_statement_terminator:
+               if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, ";"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    is_break = 1;
+                    state = state_do_statement_end;
+                }
+                else {
+                    printf("compiler - err parser let statement expected <;> symbol\n");
+                    return -1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_do_statement_end) {
+        printf("compiler: -err parser do statement not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("doStatement", n_tabs, out_file);
+    return 0;
+}
+
+// TODO - in top declaration
+int compiler_parse_statements(tokens_t* tokens, int* n, int n_tabs, FILE* out_file);
+
+int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // whileStatement: 'while' '(' expression ')' '{' statements '}'
+    enum {
+        state_while_statement_keyword          = 0,
+        state_while_statement_open_parent      = 1,
+        state_while_statement_expression       = 2,
+        state_while_statement_close_parent     = 3,
+        state_while_statement_open_body        = 4,
+        state_while_statement_statements       = 5,
+        state_while_statement_close_body       = 6,
+        state_while_statement_end              = 11
+    }
+    state = state_while_statement_keyword;
+
+    compiler_xml_print_start_tag("whileStatement", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_while_statement_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_WHILE == compiler_get_keyword_type(token->token)) {
+                    
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    state = state_while_statement_open_parent;
+                }
+                else {
+                    return -1;
+                }
+                break;
+
+            case state_while_statement_open_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "("))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_while_statement_expression;
+                }
+                else {
+                    printf("compiler - err parser while statement expected <(> symbol\n");
+                    return -1;
+                }
+                break;
+
+            case state_while_statement_expression:
+                if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_while_statement_close_parent;
+                break;
+
+            case state_while_statement_close_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, ")"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_while_statement_open_body;
+                }
+                else {
+                    printf("compiler - err parser while statement expected <)> symbol\n");
+                    return -1;
+                }
+                break;
+
+            case state_while_statement_open_body:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "{"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_while_statement_statements;
+                }
+                else {
+                    printf("compiler - err parser while statement expected <{> symbol\n");
+                    return -1;
+                }
+                break;
+
+           case state_while_statement_statements:
+                if (compiler_parse_statements(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                state = state_while_statement_close_body;
+                (*n)--;
+                break;
+
+            case state_while_statement_close_body:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "}"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    is_break = 1;
+                    state = state_while_statement_end;
+                }
+                else {
+                    printf("compiler - err parser while statement expected <}> symbol\n");
+                    return -1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_while_statement_end) {
+        printf("compiler: -err parser while statement not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("whileStatement", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // ifStatement: 'if' '(' expression ')' '{' statements '}' ('else' '{' statements '}')?
+    enum {
+        state_if_statement_keyword          = 0,
+        state_if_statement_open_parent      = 1,
+        state_if_statement_expression       = 2,
+        state_if_statement_close_parent     = 3,
+        state_if_statement_open_body        = 4,
+        state_if_statement_statements       = 5,
+        state_if_statement_close_body       = 6,
+        state_if_statement_else             = 7,
+        state_if_statement_end              = 8
+    }
+    state = state_if_statement_keyword;
+    uint8_t is_else = 0;
+
+    compiler_xml_print_start_tag("ifStatement", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_if_statement_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_IF == compiler_get_keyword_type(token->token)) {
+                    
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    state = state_if_statement_open_parent;
+                }
+                else {
+                    return -1;
+                }
+                break;
+
+            case state_if_statement_open_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "("))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_if_statement_expression;
+                }
+                else {
+                    printf("compiler - err parser if statement expected <(> symbol\n");
+                    return -1;
+                }
+                break;
+
+            case state_if_statement_expression:
+                if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_if_statement_close_parent;
+                break;
+
+            case state_if_statement_close_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, ")"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_if_statement_open_body;
+                }
+                else {
+                    printf("compiler - err parser if statement expected <)> symbol\n");
+                    return -1;
+                }
+                break;
+
+            case state_if_statement_open_body:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "{"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_if_statement_statements;
+                }
+                else {
+                    printf("compiler - err parser if statement expected <{> symbol\n");
+                    return -1;
+                }
+                break;
+
+           case state_if_statement_statements:
+                if (compiler_parse_statements(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                state = state_if_statement_close_body;
+                (*n)--;
+                break;
+
+            case state_if_statement_close_body:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "}"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    if (is_else) {
+                        is_break = 1;
+                        state = state_if_statement_end;
+                    }
+                    else {
+                        state = state_if_statement_else;
+                    }
+                }
+                else {
+                    printf("compiler - err parser if statement expected <}> symbol\n");
+                    return -1;
+                }
+                break;
+
+            case state_if_statement_else:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_ELSE == compiler_get_keyword_type(token->token)) {
+                    
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    is_else = 1;
+                    state = state_if_statement_open_body;
+                }
+                else {
+                    (*n)--;
+                    is_break = 1;
+                    state = state_if_statement_end;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_if_statement_end) {
+        printf("compiler: -err parser if statement not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("ifStatement", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // letStatement: 'let' varName ( '[' expression ']' )? '=' expression ';'
+    enum {
+        state_let_statement_keyword          = 0,
+        state_let_statement_var_name         = 1,
+        state_let_statement_open_index       = 2,
+        state_let_statement_index_expression = 3,
+        state_let_statement_close_index      = 4,
+        state_let_statement_assignement      = 5,
+        state_let_statement_expression       = 6,
+        state_let_statement_terminator       = 7,
+        state_let_statement_end              = 8
+    }
+    state = state_let_statement_keyword;
+
+    compiler_xml_print_start_tag("letStatement", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_let_statement_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_LET == compiler_get_keyword_type(token->token)) {
+                    
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    state = state_let_statement_var_name;
+                }
+                else {
+                    return -1;
+                }
+                break;
+
+            case state_let_statement_var_name:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    // TODO
+                    state = state_let_statement_assignement;
+                }
+                else {
+                    printf("compiler - err parser let statement expected var name\n");
+                    return -1;
+                }
+                break;
+
+            case state_let_statement_assignement:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "="))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_let_statement_expression;
+                }
+                else {
+                    printf("compiler - err parser let statement expected <=> symbol\n");
+                    return -1;
+                }
+                break;
+
+            case state_let_statement_expression:
+                if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_let_statement_terminator;
+                break;
+
+            case state_let_statement_terminator:
+               if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, ";"))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    is_break = 1;
+                    state = state_let_statement_end;
+                }
+                else {
+                    printf("compiler - err parser let statement expected <;> symbol\n");
+                    return -1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_let_statement_end) {
+        printf("compiler: -err parser let statement not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("letStatement", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // statement: letStatement | ifStatement | whileStatement | doStatement | returnStatement | 
+
+    token_t* token = compiler_get_token(tokens, *n);
+
+    if (token == NULL) {
+        printf("compiler - err parser statement expected keyword\n");
+        return -1;
+    }
+
+    if (COMPILER_TOKEN_NAME_KEYWORD == token->type) {
+        if (COMPILER_KEYWORD_LET == compiler_get_keyword_type(token->token)) {
+            compiler_parse_let_statement(tokens, n, n_tabs, out_file);
+        }
+        else if (COMPILER_KEYWORD_IF == compiler_get_keyword_type(token->token)) {
+            compiler_parse_if_statement(tokens, n, n_tabs, out_file);
+        }
+        else if (COMPILER_KEYWORD_WHILE == compiler_get_keyword_type(token->token)) {
+            compiler_parse_while_statement(tokens, n, n_tabs, out_file);
+        }
+        else if (COMPILER_KEYWORD_DO == compiler_get_keyword_type(token->token)) {
+            compiler_parse_do_statement(tokens, n, n_tabs, out_file);
+        }
+        else if (COMPILER_KEYWORD_RETURN == compiler_get_keyword_type(token->token)) {
+            compiler_parse_return_statement(tokens, n, n_tabs, out_file);
+        }
+        else {
+            printf("compiler - err parser statement expected let | if | while | do | return keyword\n");
+            return -1;
+        }
+    }
+    else {
+        printf("compiler - err parser statement expected keyword\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+int compiler_parse_statements(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // statements: statement*
+    enum {
+        state_statements_statement         = 0,
+        state_statements_end               = 1
+    }
+    state = state_statements_statement;
+
+    compiler_xml_print_start_tag("statements", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_statements_statement:
+                if (compiler_parse_is_statement(tokens, n)) {
+                    if (compiler_parse_statement(tokens, n, n_tabs+1, out_file) < 0) {
+                        return -1;
+                    }
+                    (*n)--;
+                }
+                else {
+                    (*n)--;
+                    is_break = 1;
+                    state = state_statements_end;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_statements_end) {
+        printf("compiler: -err parser statements not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("statements", n_tabs, out_file);
+    return 0;
+}
+
+
+int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // subroutineBody: '{' varDec* statements '}'
+    enum {
+        state_subroutine_body_open_symbol  = 0,
+        state_subroutine_body_var_dec      = 1,
+        state_subroutine_body_statements   = 2,
+        state_subroutine_body_close_symbol = 3,
+        state_subroutine_body_end          = 4
+    }
+    state = state_subroutine_body_open_symbol;
+
+    compiler_xml_print_start_tag("subroutineBody", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_subroutine_body_open_symbol:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, "{")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_subroutine_body_var_dec;
+                }
+                else {
+                    printf("compiler - err parser subroutine body expected symbol <{>\n");
+                    return -1;
+                }
+                break;
+
+           case state_subroutine_body_var_dec:
+                if (compiler_parse_is_var_dec(tokens, n)) {
+                    if (compiler_parse_var_dec(tokens, n, n_tabs+1, out_file) < 0) {
+                        return -1;
+                    }
+                }
+                else {
+                    state = state_subroutine_body_statements;
+                }
+                (*n)--;
+                break;
+
+           case state_subroutine_body_statements:
+                if (compiler_parse_statements(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                state = state_subroutine_body_close_symbol;
+                (*n)--;
+                break;
+
+            case state_subroutine_body_close_symbol:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, "}")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_subroutine_body_end;
+                    is_break = 1;
+                }
+                else {
+                    printf("compiler - err parser subroutine body expected symbol <}>\n");
+                    return -1;
+                }
+                break;
+                
+                // TODO
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_subroutine_body_end) {
+        printf("compiler: -err parser subroutine not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("subroutineBody", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_is_subroutine_dec(tokens_t* tokens, int* n)
+{
+    token_t* token = compiler_get_token(tokens, *n);
+
+    if (token == NULL)
+        return 0;
+
+    if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+           (COMPILER_KEYWORD_CONSTRUCTOR == compiler_get_keyword_type(token->token) ||
+            COMPILER_KEYWORD_METHOD == compiler_get_keyword_type(token->token) ||
+            COMPILER_KEYWORD_FUNCTION == compiler_get_keyword_type(token->token))) {
+            return 1;
+    }
+
+    return 0;
+}
+
+int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // subroutineDec: ('constructor' | 'function' | 'method') ('void' | type) 
+    //                  subroutineName '(' parameterList ')' subroutineBody
+    enum {
+        state_subroutine_dec_keyword           = 0,
+        state_subroutine_dec_type              = 1,
+        state_subroutine_dec_name              = 2,
+        state_subroutine_dec_start_parent      = 3,
+        state_subroutine_dec_param_list        = 4,
+        state_subroutine_dec_close_parent      = 5,
+        state_subroutine_dec_body              = 6,
+        state_subroutine_dec_end               = 7
+    }
+    state = state_subroutine_dec_keyword;
+
+    compiler_xml_print_start_tag("subroutineDec", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_subroutine_dec_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                        (COMPILER_KEYWORD_CONSTRUCTOR == compiler_get_keyword_type(token->token) ||
+                         COMPILER_KEYWORD_METHOD == compiler_get_keyword_type(token->token) ||
+                         COMPILER_KEYWORD_FUNCTION == compiler_get_keyword_type(token->token))) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_subroutine_dec_type;
+                }
+                else {
+                    printf("compiler - err parser subroutine dec expected constructor | function | method keywords\n");
+                    is_break = 1;
+                }
+                break;
+
+            case state_subroutine_dec_type:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                        COMPILER_KEYWORD_VOID == compiler_get_keyword_type(token->token)) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                }
+                else {
+                    if (compiler_parse_type(tokens, n, n_tabs+1, out_file) < 0) {
+                        return -1;
+                    }
+                    (*n)--;
+                }
+                state = state_subroutine_dec_name;
+                break;
+
+            case state_subroutine_dec_name:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_subroutine_dec_start_parent;
+                }
+                else {
+                    printf("compiler - err parser subroutine dec expected name\n");
+                    is_break = 1;
+                }
+                break;
+
+            case state_subroutine_dec_start_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, "(")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_subroutine_dec_param_list;
+                }
+                else {
+                    printf("compiler - err parser subroutine dec expected symbol <(>\n");
+                    is_break = 1;
+                }
+                break;
+
+           case state_subroutine_dec_param_list:
+                if (compiler_parse_param_list(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                state = state_subroutine_dec_close_parent;
+                (*n)--;
+                break;
+
+            case state_subroutine_dec_close_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, ")")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_subroutine_dec_body;
+                }
+                else {
+                    printf("compiler - err parser subroutine dec expected symbol <)>\n");
+                    is_break = 1;
+                }
+                break;
+
+           case state_subroutine_dec_body:
+                if (compiler_parse_subroutine_body(tokens, n, n_tabs+1, out_file) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                is_break = 1;
+                state = state_subroutine_dec_end;
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_subroutine_dec_end) {
+        printf("compiler: -err parser subroutineDec not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("subroutineDec", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+{
+    // class: 'class' className '{' classVarDec* subroutineDec* '}'
+    enum {
+        state_class_keyword           = 0,
+        state_class_name              = 1,
+        state_class_body_open_symbol  = 2,
+        state_class_var_dec           = 3,
+        state_class_subroutine_dec    = 4,
+        state_class_body_close_symbol = 5,
+        state_class_end               = 6
+    }
+    state = state_class_keyword;
+
+    compiler_xml_print_start_tag("class", n_tabs, out_file);
+
+    token_t* token;
+    while ((token = compiler_get_token(tokens, *n)) != NULL) {
+        uint8_t is_break = 0;
+
+        switch (state) {
+            case state_class_keyword:
+                if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
+                    COMPILER_KEYWORD_CLASS == compiler_get_keyword_type(token->token)) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_class_name;
+                }
+                else {
+                    printf("compiler - err parser class expected class keywords\n");
+                    is_break = 1;
+                }
+                break;
+
+            case state_class_name:
+                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_class_body_open_symbol;
+                }
+                else {
+                    printf("compiler - err parser class expected class name\n");
+                    is_break = 1;
+                }
+                break;
+
+            case state_class_body_open_symbol:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, "{")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_class_var_dec;
+                }
+                else {
+                    printf("compiler - err parser class expected symbol <{>\n");
+                    is_break = 1;
+                }
+                break;
+
+            case state_class_var_dec:
+                if (compiler_parse_is_class_var_dec(tokens, n)) {
+                    if (compiler_parse_class_var_dec(tokens, n, n_tabs+1, out_file) < 0) {
+                        return -1;
+                    }
+                }
+                else {
+                    state = state_class_subroutine_dec;
+                }
+                (*n)--;
+                break;
+
+            case state_class_subroutine_dec:
+                if (compiler_parse_is_subroutine_dec(tokens, n)) {
+                    if (compiler_parse_subroutine_dec(tokens, n, n_tabs+1, out_file) < 0) {
+                        return -1;
+                    }
+                }
+                else {
+                    state = state_class_body_close_symbol;
+                }
+                (*n)--;
+                break;
+
+            case state_class_body_close_symbol:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, "}")) {
+                    //
+                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    //
+                    state = state_class_end;
+                }
+                else {
+                    printf("compiler - err parser class expected symbol <}>\n");
+                    is_break = 1;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        (*n)++;
+        if (is_break)
+            break;
+    }
+
+    if (state != state_class_end) {
+        printf("compiler: -err parser class not finish, state = %d\n", state);
+        return -1;
+    }
+
+    compiler_xml_print_end_tag("class", n_tabs, out_file);
+    return 0;
+}
+
+int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
+{
+    FILE* jack_file;
+    FILE* out_file;
+    char token_line[1024+1];
+
+    jack_file = fopen(jack_file_name, "r");
+    if (jack_file == NULL) {
+        printf("compiler: err to open jack file %s\n", jack_file_name);
+        return -1;
+    }
+
+    out_file = fopen(out_file_name, "w");
+    if (out_file == NULL) {
+        printf("compiler: err to create out file %s\n", out_file_name);
+        fclose(jack_file);
+        return -1;
+    }
+
+    if (out_format == COMPILER_OUT_FORMAT_XML_TOKENS) {
+        sprintf(token_line, "<tokens>\n");
+        fwrite(token_line, 1, strlen(token_line), out_file);
+    }
+
+    tokens_t tokens;
+    compiler_init_tokens(&tokens);
+
+    char line[COMPILER_LINE_MAX_LEN+1];
+    char strip_line[COMPILER_LINE_MAX_LEN+1];
+    int n = 0;
+
+    uint8_t is_in_comment = 0;
+
+    while (fgets(line, sizeof(line), jack_file) != NULL) {
+        uint8_t is_break = 0;
+
+        printf("compiler: line %d <%s>, len = %d\n", n, line, (int)strlen(line));
+        if (strlen(line) >= COMPILER_LINE_MAX_LEN) {
+            printf("compiler: -err line %d - str of line is too big = %d \n", n, (int)strlen(line));
+            break;
+        }
+        if (compiler_strip_line(line, &is_in_comment, strip_line) < 0) {
+            printf("compiler: to strip line error\n");
+            break;
+        }
+        printf("compiler: strip_line %d <%s>, len = %d\n", n, strip_line, (int)strlen(strip_line));
+        if (strlen(strip_line) == 0)
+            continue;
+        if (out_format == COMPILER_OUT_FORMAT_STRIP) {
+            fwrite(strip_line, 1, strlen(strip_line), out_file);
+            fwrite("\n", 1, 1, out_file);
+        }
+
+        if (out_format == COMPILER_OUT_FORMAT_STRIP)
+            continue;
+
+        char* next = strip_line;
+        while (strlen(next) != 0) {
+            char token[COMPILER_TOKEN_MAX_LEN+1];
+            char *token_name;
+            if (compiler_get_token(&next, token) < 0)
+                break;
+            printf("compiler: token = %s, next = <%s>\n", token, next);
+            uint8_t token_type = compiler_get_token_type(token);
+            if (token_type == COMPILER_TOKEN_NAME_STRING_CONST)
+                compiler_skip_string_quotes(token);
+            if (out_format == COMPILER_OUT_FORMAT_XML_TOKENS) {
+                sprintf(token_line, "    <%s> %s </%s>\n",
+                        compiler_token_name[token_type],
+                        (!strcmp(token, "<")) ? "&lt;" : token,
+                        compiler_token_name[token_type]);
+                fwrite(token_line, 1, strlen(token_line), out_file);
+            }
+            if (compiler_add_to_tokens(&tokens, token_type, token) < 0) {
+                printf("compiler: max number of tokens %d\n", tokens.num);
+                is_break = 1;
+                break;
+            }
+        }
+        if (is_break)
+            break;
+    }
+
+    if (out_format == COMPILER_OUT_FORMAT_XML_TOKENS) {
+        sprintf(token_line, "</tokens>");
+        fwrite(token_line, 1, strlen(token_line), out_file);
+    }
+    
+    {
+        int i = 0;
+        token_t* token;
+        while ((token = compiler_get_token(&tokens, i)) != NULL) {
+            printf("compiler: token %d type = %u <%s>\n", i, token->type, token->token);
+            i++;
+        }
+    }
+
+    if (out_format == COMPILER_OUT_FORMAT_XML_PARSER) {
+        int i = 0;
+        if (compiler_parse_class(&tokens, &i, 0, out_file) < 0) {
+            printf("compiler: error parse class\n");
+        }
+    }
+    
+
+    fclose(jack_file);
+    fclose(out_file);
+    return 0;
+}
 
 
 int main()
@@ -2737,6 +4743,18 @@ int main()
 	    computer_init(&computer);
 	    
 	    
+	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_STRIP, "Main2.jack_strip");
+	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "Main2T.xml");
+	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Main2.xml");
+	    
+	    //compiler_do("Square.jack", COMPILER_OUT_FORMAT_STRIP, "Square.jack_strip");
+	    //compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareT.xml");
+	    //compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Square.xml");
+	
+	    //compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_STRIP, "SquareGame.jack_strip");
+	    //compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareGameT.xml");
+	    //compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_XML_PARSER, "SquareGame.xml");
+	
 	    vm_translate("fibonacci.vm", VM_OUT_FORMAT_STRIP, "fibonacci.vm_strip");
 	    vm_translate("fibonacci.vm", VM_OUT_FORMAT_ASM, "fibonacci.asm");
 	    
@@ -2950,7 +4968,7 @@ int main()
                     computer_run(&computer, 0);
                 }
                 if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                    screen_init(&(computer.memory.screen));
+                    memory_init(&(computer.memory));
                     computer_run(&computer, 1);
                 }
                 if (event.key.keysym.scancode == SDL_SCANCODE_RETURN) {
