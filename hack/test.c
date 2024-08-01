@@ -2609,6 +2609,107 @@ void compiler_xml_print_token(token_t* token, int n_tabs, FILE* out_file)
     fprintf(out_file, "%s", token_line);
 }
 
+
+enum compiler_parser_elem_type {
+    COMPILER_PARSER_ELEM_CLASS                  = 0,
+    COMPILER_PARSER_ELEM_CLASS_VAR_DEC          = 1,
+    COMPILER_PARSER_ELEM_PARAMETER_LIST         = 2,
+    COMPILER_PARSER_ELEM_VAR_DEC                = 3,
+    COMPILER_PARSER_ELEM_EXPRESSION_LIST        = 4,
+    COMPILER_PARSER_ELEM_RETURN_STATEMENT       = 5,
+    COMPILER_PARSER_ELEM_DO_STATEMENT           = 6,
+    COMPILER_PARSER_ELEM_WHILE_STATEMENT        = 7,
+    COMPILER_PARSER_ELEM_IF_STATEMENT           = 8,
+    COMPILER_PARSER_ELEM_LET_STATEMENT          = 9,
+    COMPILER_PARSER_ELEM_STATEMENTS             = 10,
+    COMPILER_PARSER_ELEM_SUBROUTINE_BODY        = 11,
+    COMPILER_PARSER_ELEM_SUBROUTINE_DEC         = 12,
+
+    COMPILER_PARSER_ELEM_TOKEN,
+
+};
+
+char* compiler_parser_ar_elem_name[] {
+    "class",                // COMPILER_PARSER_ELEM_CLASS
+    "classVarDec",          // COMPILER_PARSER_ELEM_CLASS_VAR_DEC
+    "parameterList",        // COMPILER_PARSER_ELEM_PARAMETER_LIST
+    "varDec",               // COMPILER_PARSER_ELEM_VAR_DEC
+    "expressionList",       // COMPILER_PARSER_ELEM_EXPRESSION_LIST
+    "returnStatement",      // COMPILER_PARSER_ELEM_RETURN_STATEMENT
+    "doStatement",          // COMPILER_PARSER_ELEM_DO_STATEMENT
+    "whileStatement",       // COMPILER_PARSER_ELEM_WHILE_STATEMENT
+    "ifStatement",          // COMPILER_PARSER_ELEM_IF_STATEMENT
+    "letStatement",         // COMPILER_PARSER_ELEM_LET_STATEMENT
+    "statements",           // COMPILER_PARSER_ELEM_STATEMENTS
+    "subroutineBody",       // COMPILER_PARSER_ELEM_SUBROUTINE_BODY
+    "subroutineDec",        // COMPILER_PARSER_ELEM_SUBROUTINE_DEC
+
+};
+
+struct compiler_parser_elem {
+    uint8_t type;
+    token_t token;
+
+    struct compiler_parser_elem* parent;
+    struct compiler_parser_elem* child;
+    struct compiler_parser_elem* next;
+    struct compiler_parser_elem* prev;
+};
+
+struct compiler_parser_elem* compiler_parser_add_elem(struct compiler_parser_elem* parent, uint8_t type, token_t* token) {
+
+    struct compiler_parser_elem* cur = (struct compiler_parser_elem*)malloc(sizeof(struct compiler_parser_elem));
+
+    if (cur == NULL)
+        return NULL;
+
+    cur->type = type;
+    if (token != NULL)
+        cur->token = *token;
+
+    cur->parent = parent;
+    cur->child = NULL;
+    cur->prev = NULL;
+    cur->next = NULL;
+
+    if (parent != NULL) {
+        if (parent->child == NULL) {
+            parent->child = cur;
+            cur->prev = NULL;
+        } else {
+            cur->prev = parent->child;
+            while (cur->prev->next != NULL)
+                cur->prev = cur->prev->next;
+            cur->prev->next = cur;
+        }
+    }
+
+    return cur;
+}
+
+void compiler_parser_print_elem(struct compiler_parser_elem* elem, int np, FILE* out_file);
+
+void compiler_parser_print_elem(struct compiler_parser_elem* elem, int np, FILE* out_file) {
+    if (elem == NULL)
+        return;
+
+    if (elem->type == COMPILER_PARSER_ELEM_TOKEN) {
+        compiler_xml_print_token(&(elem->token), np, out_file);
+    } else {
+        compiler_xml_print_start_tag(compiler_parser_ar_elem_name[elem->type], np, out_file);
+        compiler_parser_print_elem(elem->child, np+1, out_file);
+        compiler_xml_print_end_tag(compiler_parser_ar_elem_name[elem->type], np, out_file);
+    }
+
+    compiler_parser_print_elem(elem->next, np, out_file);
+    
+    return;
+}
+
+void compiler_parser_print_elems(struct compiler_parser_elem* root, FILE* out_file) {
+    compiler_parser_print_elem(root, 0, out_file);
+}
+
 int compiler_parse_is_class_var_dec(tokens_t* tokens, int* n)
 {
     token_t* token = compiler_get_token(tokens, *n);
@@ -2625,7 +2726,7 @@ int compiler_parse_is_class_var_dec(tokens_t* tokens, int* n)
     return 0;
 }
 
-int compiler_parse_type(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_type(tokens_t* tokens, int* n, struct compiler_parser_elem* parser_elem)
 {
     // type: int | char | boolean | className
 
@@ -2654,12 +2755,12 @@ int compiler_parse_type(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
         return -1;
     }
 
-    compiler_xml_print_token(token, n_tabs, out_file);
+    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
     (*n)++;
     return 0;
 }
 
-int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_class_var_dec(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // classVarDec: ('static' | 'field') type varName (',' varName)* ';'
     enum {
@@ -2671,7 +2772,7 @@ int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out
     }
     state = state_class_var_dec_keyword;
 
-    compiler_xml_print_start_tag("classVarDec", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_CLASS_VAR_DEC, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -2683,7 +2784,7 @@ int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out
                         (COMPILER_KEYWORD_STATIC == compiler_get_keyword_type(token->token) ||
                          COMPILER_KEYWORD_FIELD == compiler_get_keyword_type(token->token))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_class_var_dec_type;
                 }
@@ -2694,7 +2795,7 @@ int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out
                 break;
 
             case state_class_var_dec_type:
-                if (compiler_parse_type(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_type(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -2704,7 +2805,7 @@ int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out
             case state_class_var_dec_name:
                 if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_class_var_dec_next_name;
                 }
@@ -2718,14 +2819,14 @@ int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type) {
                     if (!strcmp(token->token, ";")) {
                         //
-                        compiler_xml_print_token(token, n_tabs+1, out_file);
+                        compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                         //
                         is_break = 1;
                         state = state_class_var_dec_end;
                     }
                     else if (!strcmp(token->token, ",")) {
                         //
-                        compiler_xml_print_token(token, n_tabs+1, out_file);
+                        compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                         //
                         state = state_class_var_dec_name;
                     }
@@ -2754,11 +2855,10 @@ int compiler_parse_class_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out
         return -1;
     }
 
-    compiler_xml_print_end_tag("classVarDec", n_tabs, out_file);
     return 0;
 }
 
-int compiler_parse_param_list(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_param_list(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // classVarDec: ((type varName) (',' (type varName)))?
     enum {
@@ -2769,7 +2869,7 @@ int compiler_parse_param_list(tokens_t* tokens, int* n, int n_tabs, FILE* out_fi
     }
     state = state_param_list_type;
 
-    compiler_xml_print_start_tag("parameterList", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_PARAMETER_LIST, NULL); 
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -2805,7 +2905,6 @@ int compiler_parse_param_list(tokens_t* tokens, int* n, int n_tabs, FILE* out_fi
         return -1;
     }
 
-    compiler_xml_print_end_tag("parameterList", n_tabs, out_file);
     return 0;
 }
 
@@ -2825,9 +2924,9 @@ int compiler_parse_is_var_dec(tokens_t* tokens, int* n)
 }
 
 // TODO to top declaration
-int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* out_file);
+int compiler_parse_subroutine_call(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem);
 
-int compiler_parse_term(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_term(tokens_t* tokens, int* n, struct compiler_parser_elem* parser_elem)
 {
     // term: varName | subroutineCall
     enum {
@@ -2849,14 +2948,14 @@ int compiler_parse_term(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
                             (COMPILER_TOKEN_NAME_SYMBOL == next_token->type &&
                              (!strcmp(next_token->token, ".")))) {
                         //
-                        if (compiler_parse_subroutine_call(tokens, n, n_tabs, out_file) < 0) {
+                        if (compiler_parse_subroutine_call(tokens, n, parser_elem) < 0) {
                             return -1;
                         }
                         //
                         (*n)--;
                     }
                     else {
-                        compiler_xml_print_token(token, n_tabs, out_file);
+                        compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                         //
                     }
                     is_break = 1;
@@ -2885,7 +2984,7 @@ int compiler_parse_term(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
     return 0;
 }
 
-int compiler_parse_expression(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_expression(tokens_t* tokens, int* n, struct compiler_parser_elem* parser_elem)
 {
     // expression: term (op term)*
     enum {
@@ -2901,7 +3000,7 @@ int compiler_parse_expression(tokens_t* tokens, int* n, int n_tabs, FILE* out_fi
 
         switch (state) {
            case state_expression_term:
-                if (compiler_parse_term(tokens, n, n_tabs, out_file) < 0) {
+                if (compiler_parse_term(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -2938,7 +3037,7 @@ int compiler_parse_expression(tokens_t* tokens, int* n, int n_tabs, FILE* out_fi
     return 0;
 }
 
-int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_var_dec(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // varDec: 'var' type varName (',' varName)* ';'
     enum {
@@ -2950,7 +3049,7 @@ int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
     }
     state = state_var_dec_keyword;
 
-    compiler_xml_print_start_tag("varDec", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_VAR_DEC, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -2961,7 +3060,7 @@ int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_VAR == compiler_get_keyword_type(token->token)) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_var_dec_type;
                 }
@@ -2972,7 +3071,7 @@ int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
                 break;
 
            case state_var_dec_type:
-                if (compiler_parse_type(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_type(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -2982,7 +3081,7 @@ int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
             case state_var_dec_name:
                 if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_var_dec_next;
                 }
@@ -3005,7 +3104,7 @@ int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
                         printf("compiler - err parser type unexpected symbol %s\n", token->token);
                         return -1;
                     }
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                 }
                 else {
                     printf("compiler - err parser type expected symbol <;> or <,>\n");
@@ -3027,11 +3126,10 @@ int compiler_parse_var_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
         return -1;
     }
 
-    compiler_xml_print_end_tag("varDec", n_tabs, out_file);
     return 0;
 }
 
-int compiler_parse_expression_list(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_expression_list(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // expressionList: (expression (',' expression)*)?
     // TODO
@@ -3041,7 +3139,7 @@ int compiler_parse_expression_list(tokens_t* tokens, int* n, int n_tabs, FILE* o
     }
     state = state_expression_list_close_parent;
 
-    compiler_xml_print_start_tag("expressionList", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_EXPRESSION_LIST, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3075,12 +3173,10 @@ int compiler_parse_expression_list(tokens_t* tokens, int* n, int n_tabs, FILE* o
         return -1;
     }
 
-    compiler_xml_print_end_tag("expressionList", n_tabs, out_file);
-
     return 0;
 }
 
-int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_subroutine_call(tokens_t* tokens, int* n, struct compiler_parser_elem* parser_elem)
 {
     // subroutineCall: subroutineName '(' parameterList ')' | (className | varName) '.' subroutineName '(' expressionList ')'
     enum {
@@ -3102,7 +3198,7 @@ int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* o
             case state_subroutine_call_name1:
                 if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
-                    compiler_xml_print_token(token, n_tabs, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_call_dot;
                 }
@@ -3116,7 +3212,7 @@ int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, ".")) {
                     //
-                    compiler_xml_print_token(token, n_tabs, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_call_name2;
                 }
@@ -3129,7 +3225,7 @@ int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* o
            case state_subroutine_call_name2:
                 if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
-                    compiler_xml_print_token(token, n_tabs, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_call_start_parent;
                 }
@@ -3143,7 +3239,7 @@ int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, "(")) {
                     //
-                    compiler_xml_print_token(token, n_tabs, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_call_expression_list;
                 }
@@ -3154,7 +3250,7 @@ int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 break;
 
            case state_subroutine_call_expression_list:
-                if (compiler_parse_expression_list(tokens, n, n_tabs, out_file) < 0) {
+                if (compiler_parse_expression_list(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -3165,7 +3261,7 @@ int compiler_parse_subroutine_call(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, ")")) {
                     //
-                    compiler_xml_print_token(token, n_tabs, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     is_break = 1;
                     state = state_subroutine_call_end;
@@ -3213,7 +3309,7 @@ int compiler_parse_is_statement(tokens_t* tokens, int* n)
 }
 
 
-int compiler_parse_return_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_return_statement(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // returnStatement: 'return' expression? ';'
     enum {
@@ -3224,7 +3320,7 @@ int compiler_parse_return_statement(tokens_t* tokens, int* n, int n_tabs, FILE* 
     }
     state = state_return_statement_keyword;
 
-    compiler_xml_print_start_tag("returnStatement", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_RETURN_STATEMENT, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3235,7 +3331,7 @@ int compiler_parse_return_statement(tokens_t* tokens, int* n, int n_tabs, FILE* 
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_RETURN == compiler_get_keyword_type(token->token)) {
                     
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     state = state_return_statement_expression;
                 }
                 else {
@@ -3247,13 +3343,13 @@ int compiler_parse_return_statement(tokens_t* tokens, int* n, int n_tabs, FILE* 
                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, ";"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     is_break = 1;
                     state = state_return_statement_end;
                 }
                 else {
-                    if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                    if (compiler_parse_expression(tokens, n, parser_elem) < 0) {
                         return -1;
                     }
                     (*n)--;
@@ -3265,7 +3361,7 @@ int compiler_parse_return_statement(tokens_t* tokens, int* n, int n_tabs, FILE* 
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, ";"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     is_break = 1;
                     state = state_return_statement_end;
@@ -3285,13 +3381,10 @@ int compiler_parse_return_statement(tokens_t* tokens, int* n, int n_tabs, FILE* 
         return -1;
     }
 
-    compiler_xml_print_end_tag("returnStatement", n_tabs, out_file);
     return 0;
 }
 
-
-
-int compiler_parse_do_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_do_statement(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // doStatement: 'do' subroutineCall ';'
     enum {
@@ -3302,7 +3395,7 @@ int compiler_parse_do_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
     }
     state = state_do_statement_keyword;
 
-    compiler_xml_print_start_tag("doStatement", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_DO_STATEMENT, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3313,7 +3406,7 @@ int compiler_parse_do_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_DO == compiler_get_keyword_type(token->token)) {
                     
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     state = state_do_statement_subroutine_call;
                 }
                 else {
@@ -3322,7 +3415,7 @@ int compiler_parse_do_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 break;
 
             case state_do_statement_subroutine_call:
-                if (compiler_parse_subroutine_call(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_subroutine_call(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -3333,7 +3426,7 @@ int compiler_parse_do_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, ";"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     is_break = 1;
                     state = state_do_statement_end;
@@ -3358,14 +3451,13 @@ int compiler_parse_do_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
         return -1;
     }
 
-    compiler_xml_print_end_tag("doStatement", n_tabs, out_file);
     return 0;
 }
 
 // TODO - in top declaration
-int compiler_parse_statements(tokens_t* tokens, int* n, int n_tabs, FILE* out_file);
+int compiler_parse_statements(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem);
 
-int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_while_statement(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // whileStatement: 'while' '(' expression ')' '{' statements '}'
     enum {
@@ -3380,7 +3472,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
     }
     state = state_while_statement_keyword;
 
-    compiler_xml_print_start_tag("whileStatement", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_WHILE_STATEMENT, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3391,7 +3483,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_WHILE == compiler_get_keyword_type(token->token)) {
                     
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     state = state_while_statement_open_parent;
                 }
                 else {
@@ -3403,7 +3495,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "("))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_while_statement_expression;
                 }
@@ -3414,7 +3506,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 break;
 
             case state_while_statement_expression:
-                if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_expression(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -3425,7 +3517,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, ")"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_while_statement_open_body;
                 }
@@ -3439,7 +3531,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "{"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_while_statement_statements;
                 }
@@ -3450,7 +3542,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 break;
 
            case state_while_statement_statements:
-                if (compiler_parse_statements(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_statements(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 state = state_while_statement_close_body;
@@ -3461,7 +3553,7 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "}"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     is_break = 1;
                     state = state_while_statement_end;
@@ -3486,11 +3578,10 @@ int compiler_parse_while_statement(tokens_t* tokens, int* n, int n_tabs, FILE* o
         return -1;
     }
 
-    compiler_xml_print_end_tag("whileStatement", n_tabs, out_file);
     return 0;
 }
 
-int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_if_statement(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // ifStatement: 'if' '(' expression ')' '{' statements '}' ('else' '{' statements '}')?
     enum {
@@ -3507,7 +3598,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
     state = state_if_statement_keyword;
     uint8_t is_else = 0;
 
-    compiler_xml_print_start_tag("ifStatement", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_IF_STATEMENT, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3518,7 +3609,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_IF == compiler_get_keyword_type(token->token)) {
                     
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     state = state_if_statement_open_parent;
                 }
                 else {
@@ -3530,7 +3621,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "("))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_if_statement_expression;
                 }
@@ -3541,7 +3632,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 break;
 
             case state_if_statement_expression:
-                if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_expression(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -3552,7 +3643,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, ")"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_if_statement_open_body;
                 }
@@ -3566,7 +3657,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "{"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_if_statement_statements;
                 }
@@ -3577,7 +3668,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 break;
 
            case state_if_statement_statements:
-                if (compiler_parse_statements(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_statements(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 state = state_if_statement_close_body;
@@ -3588,7 +3679,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "}"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     if (is_else) {
                         is_break = 1;
@@ -3608,7 +3699,7 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_ELSE == compiler_get_keyword_type(token->token)) {
                     
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     is_else = 1;
                     state = state_if_statement_open_body;
                 }
@@ -3633,11 +3724,10 @@ int compiler_parse_if_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_
         return -1;
     }
 
-    compiler_xml_print_end_tag("ifStatement", n_tabs, out_file);
     return 0;
 }
 
-int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_let_statement(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // letStatement: 'let' varName ( '[' expression ']' )? '=' expression ';'
     enum {
@@ -3653,7 +3743,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out
     }
     state = state_let_statement_keyword;
 
-    compiler_xml_print_start_tag("letStatement", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_LET_STATEMENT, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3664,7 +3754,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_LET == compiler_get_keyword_type(token->token)) {
                     
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     state = state_let_statement_var_name;
                 }
                 else {
@@ -3675,7 +3765,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out
             case state_let_statement_var_name:
                 if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     // TODO
                     state = state_let_statement_assignement;
@@ -3690,7 +3780,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "="))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_let_statement_expression;
                 }
@@ -3701,7 +3791,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out
                 break;
 
             case state_let_statement_expression:
-                if (compiler_parse_expression(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_expression(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -3712,7 +3802,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out
                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, ";"))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     is_break = 1;
                     state = state_let_statement_end;
@@ -3737,11 +3827,10 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out
         return -1;
     }
 
-    compiler_xml_print_end_tag("letStatement", n_tabs, out_file);
     return 0;
 }
 
-int compiler_parse_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_statement(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // statement: letStatement | ifStatement | whileStatement | doStatement | returnStatement | 
 
@@ -3754,19 +3843,19 @@ int compiler_parse_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_fil
 
     if (COMPILER_TOKEN_NAME_KEYWORD == token->type) {
         if (COMPILER_KEYWORD_LET == compiler_get_keyword_type(token->token)) {
-            compiler_parse_let_statement(tokens, n, n_tabs, out_file);
+            compiler_parse_let_statement(tokens, n, parent_elem);
         }
         else if (COMPILER_KEYWORD_IF == compiler_get_keyword_type(token->token)) {
-            compiler_parse_if_statement(tokens, n, n_tabs, out_file);
+            compiler_parse_if_statement(tokens, n, parent_elem);
         }
         else if (COMPILER_KEYWORD_WHILE == compiler_get_keyword_type(token->token)) {
-            compiler_parse_while_statement(tokens, n, n_tabs, out_file);
+            compiler_parse_while_statement(tokens, n, parent_elem);
         }
         else if (COMPILER_KEYWORD_DO == compiler_get_keyword_type(token->token)) {
-            compiler_parse_do_statement(tokens, n, n_tabs, out_file);
+            compiler_parse_do_statement(tokens, n, parent_elem);
         }
         else if (COMPILER_KEYWORD_RETURN == compiler_get_keyword_type(token->token)) {
-            compiler_parse_return_statement(tokens, n, n_tabs, out_file);
+            compiler_parse_return_statement(tokens, n, parent_elem);
         }
         else {
             printf("compiler - err parser statement expected let | if | while | do | return keyword\n");
@@ -3781,7 +3870,7 @@ int compiler_parse_statement(tokens_t* tokens, int* n, int n_tabs, FILE* out_fil
     return 0;
 }
 
-int compiler_parse_statements(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_statements(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // statements: statement*
     enum {
@@ -3790,7 +3879,7 @@ int compiler_parse_statements(tokens_t* tokens, int* n, int n_tabs, FILE* out_fi
     }
     state = state_statements_statement;
 
-    compiler_xml_print_start_tag("statements", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_STATEMENTS, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3799,7 +3888,7 @@ int compiler_parse_statements(tokens_t* tokens, int* n, int n_tabs, FILE* out_fi
         switch (state) {
             case state_statements_statement:
                 if (compiler_parse_is_statement(tokens, n)) {
-                    if (compiler_parse_statement(tokens, n, n_tabs+1, out_file) < 0) {
+                    if (compiler_parse_statement(tokens, n, parser_elem) < 0) {
                         return -1;
                     }
                     (*n)--;
@@ -3825,12 +3914,11 @@ int compiler_parse_statements(tokens_t* tokens, int* n, int n_tabs, FILE* out_fi
         return -1;
     }
 
-    compiler_xml_print_end_tag("statements", n_tabs, out_file);
     return 0;
 }
 
 
-int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_subroutine_body(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // subroutineBody: '{' varDec* statements '}'
     enum {
@@ -3842,7 +3930,7 @@ int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* o
     }
     state = state_subroutine_body_open_symbol;
 
-    compiler_xml_print_start_tag("subroutineBody", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_SUBROUTINE_BODY, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3853,7 +3941,7 @@ int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, "{")) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_body_var_dec;
                 }
@@ -3865,7 +3953,7 @@ int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* o
 
            case state_subroutine_body_var_dec:
                 if (compiler_parse_is_var_dec(tokens, n)) {
-                    if (compiler_parse_var_dec(tokens, n, n_tabs+1, out_file) < 0) {
+                    if (compiler_parse_var_dec(tokens, n, parser_elem) < 0) {
                         return -1;
                     }
                 }
@@ -3876,7 +3964,7 @@ int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 break;
 
            case state_subroutine_body_statements:
-                if (compiler_parse_statements(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_statements(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 state = state_subroutine_body_close_symbol;
@@ -3887,7 +3975,7 @@ int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* o
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, "}")) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_body_end;
                     is_break = 1;
@@ -3914,7 +4002,6 @@ int compiler_parse_subroutine_body(tokens_t* tokens, int* n, int n_tabs, FILE* o
         return -1;
     }
 
-    compiler_xml_print_end_tag("subroutineBody", n_tabs, out_file);
     return 0;
 }
 
@@ -3935,7 +4022,7 @@ int compiler_parse_is_subroutine_dec(tokens_t* tokens, int* n)
     return 0;
 }
 
-int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // subroutineDec: ('constructor' | 'function' | 'method') ('void' | type) 
     //                  subroutineName '(' parameterList ')' subroutineBody
@@ -3951,7 +4038,7 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
     }
     state = state_subroutine_dec_keyword;
 
-    compiler_xml_print_start_tag("subroutineDec", n_tabs, out_file);
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_SUBROUTINE_DEC, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3964,7 +4051,7 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
                          COMPILER_KEYWORD_METHOD == compiler_get_keyword_type(token->token) ||
                          COMPILER_KEYWORD_FUNCTION == compiler_get_keyword_type(token->token))) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_dec_type;
                 }
@@ -3978,10 +4065,10 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                         COMPILER_KEYWORD_VOID == compiler_get_keyword_type(token->token)) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                 }
                 else {
-                    if (compiler_parse_type(tokens, n, n_tabs+1, out_file) < 0) {
+                    if (compiler_parse_type(tokens, n, parser_elem) < 0) {
                         return -1;
                     }
                     (*n)--;
@@ -3992,7 +4079,7 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
             case state_subroutine_dec_name:
                 if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_dec_start_parent;
                 }
@@ -4006,7 +4093,7 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, "(")) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_dec_param_list;
                 }
@@ -4017,7 +4104,7 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
                 break;
 
            case state_subroutine_dec_param_list:
-                if (compiler_parse_param_list(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_param_list(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 state = state_subroutine_dec_close_parent;
@@ -4028,7 +4115,7 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, ")")) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_subroutine_dec_body;
                 }
@@ -4039,7 +4126,7 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
                 break;
 
            case state_subroutine_dec_body:
-                if (compiler_parse_subroutine_body(tokens, n, n_tabs+1, out_file) < 0) {
+                if (compiler_parse_subroutine_body(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
@@ -4061,11 +4148,10 @@ int compiler_parse_subroutine_dec(tokens_t* tokens, int* n, int n_tabs, FILE* ou
         return -1;
     }
 
-    compiler_xml_print_end_tag("subroutineDec", n_tabs, out_file);
     return 0;
 }
 
-int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
+int compiler_parse_class(tokens_t* tokens, int* n, struct compiler_parser_elem** pclass_elem)
 {
     // class: 'class' className '{' classVarDec* subroutineDec* '}'
     enum {
@@ -4079,7 +4165,7 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
     }
     state = state_class_keyword;
 
-    compiler_xml_print_start_tag("class", n_tabs, out_file);
+    *pclass_elem = compiler_parser_add_elem(NULL, COMPILER_PARSER_ELEM_CLASS, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -4090,7 +4176,7 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
                 if (COMPILER_TOKEN_NAME_KEYWORD == token->type &&
                     COMPILER_KEYWORD_CLASS == compiler_get_keyword_type(token->token)) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(*pclass_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_class_name;
                 }
@@ -4103,7 +4189,7 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
             case state_class_name:
                 if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(*pclass_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_class_body_open_symbol;
                 }
@@ -4117,7 +4203,7 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, "{")) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(*pclass_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_class_var_dec;
                 }
@@ -4129,7 +4215,7 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
 
             case state_class_var_dec:
                 if (compiler_parse_is_class_var_dec(tokens, n)) {
-                    if (compiler_parse_class_var_dec(tokens, n, n_tabs+1, out_file) < 0) {
+                    if (compiler_parse_class_var_dec(tokens, n, *pclass_elem) < 0) {
                         return -1;
                     }
                 }
@@ -4141,7 +4227,7 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
 
             case state_class_subroutine_dec:
                 if (compiler_parse_is_subroutine_dec(tokens, n)) {
-                    if (compiler_parse_subroutine_dec(tokens, n, n_tabs+1, out_file) < 0) {
+                    if (compiler_parse_subroutine_dec(tokens, n, *pclass_elem) < 0) {
                         return -1;
                     }
                 }
@@ -4155,7 +4241,7 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, "}")) {
                     //
-                    compiler_xml_print_token(token, n_tabs+1, out_file);
+                    compiler_parser_add_elem(*pclass_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
                     state = state_class_end;
                 }
@@ -4179,7 +4265,6 @@ int compiler_parse_class(tokens_t* tokens, int* n, int n_tabs, FILE* out_file)
         return -1;
     }
 
-    compiler_xml_print_end_tag("class", n_tabs, out_file);
     return 0;
 }
 
@@ -4282,9 +4367,12 @@ int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
 
     if (out_format == COMPILER_OUT_FORMAT_XML_PARSER) {
         int i = 0;
-        if (compiler_parse_class(&tokens, &i, 0, out_file) < 0) {
+        
+        struct compiler_parser_elem* class_elem = NULL;
+        if (compiler_parse_class(&tokens, &i, &class_elem) < 0) {
             printf("compiler: error parse class\n");
         }
+        compiler_parser_print_elems(class_elem, out_file);
     }
     
 
@@ -4743,13 +4831,13 @@ int main()
 	    computer_init(&computer);
 	    
 	    
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_STRIP, "Main2.jack_strip");
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "Main2T.xml");
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Main2.xml");
+	    //compiler_do("Main.jack", COMPILER_OUT_FORMAT_STRIP, "Main.jack_strip");
+	    //compiler_do("Main.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "MainT.xml");
+	    //compiler_do("Main.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Main.xml");
 	    
-	    //compiler_do("Square.jack", COMPILER_OUT_FORMAT_STRIP, "Square.jack_strip");
-	    //compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareT.xml");
-	    //compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Square.xml");
+	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_STRIP, "Square.jack_strip");
+	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareT.xml");
+	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Square.xml");
 	
 	    //compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_STRIP, "SquareGame.jack_strip");
 	    //compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareGameT.xml");
