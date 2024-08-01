@@ -4355,26 +4355,18 @@ int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
         sprintf(token_line, "</tokens>");
         fwrite(token_line, 1, strlen(token_line), out_file);
     }
-    
-    {
+
+    struct compiler_parser_elem* class_elem = NULL;
+    if (out_format >= COMPILER_OUT_FORMAT_XML_PARSER) {
         int i = 0;
-        token_t* token;
-        while ((token = compiler_get_token(&tokens, i)) != NULL) {
-            printf("compiler: token %d type = %u <%s>\n", i, token->type, token->token);
-            i++;
-        }
+        if (compiler_parse_class(&tokens, &i, &class_elem) < 0)
+            printf("compiler: error parse class\n");
     }
 
-    if (out_format == COMPILER_OUT_FORMAT_XML_PARSER) {
-        int i = 0;
-        
-        struct compiler_parser_elem* class_elem = NULL;
-        if (compiler_parse_class(&tokens, &i, &class_elem) < 0) {
-            printf("compiler: error parse class\n");
-        }
+    if (out_format == COMPILER_OUT_FORMAT_XML_PARSER)
         compiler_parser_print_elems(class_elem, out_file);
-    }
-    
+
+    // TODO
 
     fclose(jack_file);
     fclose(out_file);
