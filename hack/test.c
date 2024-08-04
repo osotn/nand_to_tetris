@@ -2273,6 +2273,7 @@ enum {
     COMPILER_OUT_FORMAT_XML_TOKENS       = 2,
     COMPILER_OUT_FORMAT_XML_PARSER       = 3,
     COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE = 4,
+    COMPILER_OUT_FORMAT_VM               = 5,
 };
 
 #define COMPILER_LINE_MAX_LEN 1024
@@ -2483,7 +2484,7 @@ int compiler_is_keyword(char* token)
     return 0;
 }
 
-uint8_t compiler_get_keyword_type(char*  token) {
+uint8_t compiler_get_keyword_type(char* token) {
     int i = 0;
     for (i = 0; i < AR_SIZEOF(compiler_keywords); i++) {
         if (!strcmp(token, compiler_keywords[i]))
@@ -2563,6 +2564,46 @@ uint8_t compiler_get_token_type(char* token) {
     return token_type;
 }
 
+uint8_t compiler_is_token_keyword_const(token_t* token)
+{
+    if (COMPILER_TOKEN_NAME_KEYWORD != token->type)
+        return 0;
+
+    uint8_t type = compiler_get_keyword_type(token->token);
+    switch (type) {
+        case COMPILER_KEYWORD_TRUE:
+        case COMPILER_KEYWORD_FALSE:
+        case COMPILER_KEYWORD_NULL:
+        case COMPILER_KEYWORD_THIS:
+            return 1;
+        
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+uint8_t compiler_is_token_op(token_t* token)
+{
+    if (COMPILER_TOKEN_NAME_SYMBOL != token->type)
+        return 0;
+
+    if ((!strcmp("+", token->token)) ||
+        (!strcmp("-", token->token)) ||
+        (!strcmp("*", token->token)) ||
+        (!strcmp("/", token->token)) ||
+        (!strcmp("&", token->token)) ||
+        (!strcmp("|", token->token)) ||
+        (!strcmp("<", token->token)) ||
+        (!strcmp(">", token->token)) ||
+        (!strcmp("=", token->token))) {
+        return 1;
+    }
+
+    return 0;
+}
+
 void compiler_xml_print_start_tag(char* tag, int n_tabs, FILE* out_file) {
 
     char token_line[1024+1];
@@ -2625,6 +2666,8 @@ enum compiler_parser_elem_type {
     COMPILER_PARSER_ELEM_STATEMENTS             = 10,
     COMPILER_PARSER_ELEM_SUBROUTINE_BODY        = 11,
     COMPILER_PARSER_ELEM_SUBROUTINE_DEC         = 12,
+    COMPILER_PARSER_ELEM_EXPRESSION             = 13,
+    COMPILER_PARSER_ELEM_TERM                   = 14,
 
     COMPILER_PARSER_ELEM_TOKEN,
 
@@ -2644,6 +2687,8 @@ char* compiler_parser_ar_elem_name[] {
     "statements",           // COMPILER_PARSER_ELEM_STATEMENTS
     "subroutineBody",       // COMPILER_PARSER_ELEM_SUBROUTINE_BODY
     "subroutineDec",        // COMPILER_PARSER_ELEM_SUBROUTINE_DEC
+    "expression",           // COMPILER_PARSER_ELEM_EXPRESSION
+    "term",                 // COMPILER_PARSER_ELEM_TERM
 
 };
 
@@ -2970,46 +3015,144 @@ int compiler_parse_is_var_dec(tokens_t* tokens, int* n)
 
 // TODO to top declaration
 int compiler_parse_subroutine_call(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem);
+int compiler_parse_expression(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem);
 
-int compiler_parse_term(tokens_t* tokens, int* n, struct compiler_parser_elem* parser_elem)
+int compiler_parse_term(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
-    // term: varName | subroutineCall
+    // term: intConstant | stringConstant | keywordConstant | varName | '(' expression ')' |
+    //       varName '[' expression ']' | (unaryOp term) | subroutineCall
     enum {
-        state_term          = 0,
-        state_term_end           = 1
+        state_term               = 0,
+        state_term_expression    = 1,
+        state_term_expression2   = 2,
+        state_term_close_parent  = 3,
+        state_term_after_name    = 4,
+        state_term_term          = 5,
+        state_term_close_index   = 6,
+        state_term_end           = 7,
     }
     state = state_term;
+
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_TERM, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
         uint8_t is_break = 0;
 
         switch (state) {
+
             case state_term:
-                if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
+                // intConst | stringConstat | keywordConst
+                if (COMPILER_TOKEN_NAME_INT_CONST == token->type ||
+                    COMPILER_TOKEN_NAME_STRING_CONST == token->type ||
+                    compiler_is_token_keyword_const(token)) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                    //
+                    is_break = 1;
+                    state = state_term_end;
+                }       // unaryOp
+                else if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                         ((!strcmp("-", token->token)) ||
+                          (!strcmp("~", token->token)))) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                    //
+                    state = state_term_term;
+                }       // '(' expression ')'
+                else if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                         (!strcmp("(", token->token))) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                    //
+                    state = state_term_expression;
+                }       // var (varName | varName '[' ) or func name (funcName '(' | name '.' funcName '('
+                else if (COMPILER_TOKEN_NAME_IDENTIFIER == token->type) {
                     //
                     token_t* next_token = compiler_get_token(tokens, (*n)+1);
                     if (next_token != NULL &&
                             (COMPILER_TOKEN_NAME_SYMBOL == next_token->type &&
-                             (!strcmp(next_token->token, ".")))) {
+                             ((!strcmp(next_token->token, ".")) || 
+                              (!strcmp(next_token->token, "("))))) {
                         //
-                        if (compiler_parse_subroutine_call(tokens, n, parser_elem) < 0) {
+                        if (compiler_parse_subroutine_call(tokens, n, parser_elem) < 0)
                             return -1;
-                        }
                         //
                         (*n)--;
+                        is_break = 1;
+                        state = state_term_end;
                     }
                     else {
+                        // varName
                         compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                         //
+                        state = state_term_after_name;
                     }
-                    is_break = 1;
-                    state = state_term_end;
                 }
                 else {
                     printf("compiler - err parser term expected name\n");
                     return -1;
                 }
+                break;
+
+            case state_term_expression:
+            case state_term_expression2:
+                //
+                if (compiler_parse_expression(tokens, n, parser_elem) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = (state == state_term_expression) ? state_term_close_parent : state_term_close_index;
+                break;
+
+            case state_term_term:
+                //
+                if (compiler_parse_term(tokens, n, parser_elem) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                is_break = 1;
+                state = state_term_end;
+                break;
+
+            case state_term_close_parent:
+                if (COMPILER_TOKEN_NAME_SYMBOL != token->type ||
+                    strcmp(")", token->token)) {
+                        printf("compiler parser - term expected close ')'.\n");
+                        return -1;
+                }
+                //
+                compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                //
+                is_break = 1;
+                state = state_term_end;
+                break;
+                
+            case state_term_after_name:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp("[", token->token))) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token); 
+                    state = state_term_expression2;
+                }
+                else {
+                    (*n)--;
+                    is_break = 1;
+                    state = state_term_end;
+                }
+                break;
+
+            case state_term_close_index:
+                if (COMPILER_TOKEN_NAME_SYMBOL != token->type ||
+                    strcmp("]", token->token)) {
+                        printf("compiler parser - term expected close ']'.\n");
+                        return -1;
+                }
+                //
+                compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                //
+                is_break = 1;
+                state = state_term_end;
                 break;
 
             default:
@@ -3029,7 +3172,7 @@ int compiler_parse_term(tokens_t* tokens, int* n, struct compiler_parser_elem* p
     return 0;
 }
 
-int compiler_parse_expression(tokens_t* tokens, int* n, struct compiler_parser_elem* parser_elem)
+int compiler_parse_expression(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // expression: term (op term)*
     enum {
@@ -3038,6 +3181,8 @@ int compiler_parse_expression(tokens_t* tokens, int* n, struct compiler_parser_e
         state_expression_end           = 2
     }
     state = state_expression_term;
+
+    struct compiler_parser_elem* parser_elem = compiler_parser_add_elem(parent_elem, COMPILER_PARSER_ELEM_EXPRESSION, NULL);
 
     token_t* token;
     while ((token = compiler_get_token(tokens, *n)) != NULL) {
@@ -3053,9 +3198,10 @@ int compiler_parse_expression(tokens_t* tokens, int* n, struct compiler_parser_e
                 break;
 
             case state_expression_op:
-                if (0 /*compiler_parse_is_op(tokens, n) < 0)*/) {
-                    // TODO
-                    (*n)--;
+                if (compiler_is_token_op(token)) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                    //
                     state = state_expression_term;
                 }
                 else {
@@ -3177,10 +3323,11 @@ int compiler_parse_var_dec(tokens_t* tokens, int* n, struct compiler_parser_elem
 int compiler_parse_expression_list(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
     // expressionList: (expression (',' expression)*)?
-    // TODO
     enum {
         state_expression_list_close_parent      = 0,
-        state_expression_list_end               = 7
+        state_expression_list_expression        = 1,
+        state_expression_list_next              = 2,
+        state_expression_list_end               = 3
     }
     state = state_expression_list_close_parent;
 
@@ -3195,12 +3342,36 @@ int compiler_parse_expression_list(tokens_t* tokens, int* n, struct compiler_par
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     !strcmp(token->token, ")")) {
                     //
-                    (*n)--;
+                    
                     is_break = 1;
                     state = state_expression_list_end;
                 }
                 else {
-                    // TODO
+                    state = state_expression_list_expression;
+                }
+                (*n)--;
+                break;
+
+            case state_expression_list_expression:
+                if (compiler_parse_expression(tokens, n, parser_elem) < 0) {
+                    return -1;
+                }
+                (*n)--;
+                state = state_expression_list_next;
+                break;
+
+            case state_expression_list_next:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    !strcmp(token->token, ",")) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                    //
+                    state = state_expression_list_expression;
+                }
+                else {
+                    (*n)--;
+                    is_break = 1;
+                    state = state_expression_list_end;
                 }
                 break;
 
@@ -3778,10 +3949,10 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, struct compiler_parse
     enum {
         state_let_statement_keyword          = 0,
         state_let_statement_var_name         = 1,
-        state_let_statement_open_index       = 2,
+        state_let_statement_after_var_name   = 2,
         state_let_statement_index_expression = 3,
         state_let_statement_close_index      = 4,
-        state_let_statement_assignement      = 5,
+        state_let_statement_assignment      = 5,
         state_let_statement_expression       = 6,
         state_let_statement_terminator       = 7,
         state_let_statement_end              = 8
@@ -3812,8 +3983,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, struct compiler_parse
                     //
                     compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
                     //
-                    // TODO
-                    state = state_let_statement_assignement;
+                    state = state_let_statement_after_var_name;
                 }
                 else {
                     printf("compiler - err parser let statement expected var name\n");
@@ -3821,7 +3991,21 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, struct compiler_parse
                 }
                 break;
 
-            case state_let_statement_assignement:
+            case state_let_statement_after_var_name:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "["))) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                    //
+                    state = state_let_statement_index_expression;
+                }
+                else {
+                    (*n)--;
+                    state = state_let_statement_assignment;
+                }
+                break;
+
+            case state_let_statement_assignment:
                 if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
                     (!strcmp(token->token, "="))) {
                     //
@@ -3836,11 +4020,27 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, struct compiler_parse
                 break;
 
             case state_let_statement_expression:
+            case state_let_statement_index_expression:
                 if (compiler_parse_expression(tokens, n, parser_elem) < 0) {
                     return -1;
                 }
                 (*n)--;
-                state = state_let_statement_terminator;
+                state = (state == state_let_statement_expression) ? 
+                            state_let_statement_terminator : state_let_statement_close_index;
+                break;
+
+            case state_let_statement_close_index:
+                if (COMPILER_TOKEN_NAME_SYMBOL == token->type &&
+                    (!strcmp(token->token, "]"))) {
+                    //
+                    compiler_parser_add_elem(parser_elem, COMPILER_PARSER_ELEM_TOKEN, token);
+                    //
+                    state = state_let_statement_assignment;
+                }
+                else {
+                    printf("compiler - err parser let statement expected <]> symbol\n");
+                    return -1;
+                }
                 break;
 
             case state_let_statement_terminator:
@@ -3877,7 +4077,7 @@ int compiler_parse_let_statement(tokens_t* tokens, int* n, struct compiler_parse
 
 int compiler_parse_statement(tokens_t* tokens, int* n, struct compiler_parser_elem* parent_elem)
 {
-    // statement: letStatement | ifStatement | whileStatement | doStatement | returnStatement | 
+    // statement: letStatement | ifStatement | whileStatement | doStatement | returnStatement
 
     token_t* token = compiler_get_token(tokens, *n);
 
@@ -4344,6 +4544,49 @@ token_t* compiler_code_gen_get_class_name_token(struct compiler_parser_elem* cla
     return &(parse_elem->token);
 }
 
+enum compiler_code_gen_routine_kind {
+    COMPILER_CODE_GEN_ROUTINE_KIND_CONSTRUCTOR  = 0,
+    COMPILER_CODE_GEN_ROUTINE_KIND_METHOD       = 1,
+    COMPILER_CODE_GEN_ROUTINE_KIND_FUNCTION     = 2,
+    COMPILER_CODE_GEN_ROUTINE_KIND_ERROR        = 3
+};
+
+char* compiler_code_gen_routine_ar_kind_name[] = {
+    "constructor",        // = COMPILER_CODE_GEN_ROUTINE_KIND_CONSTRUCTOR
+    "method",             // = COMPILER_CODE_GEN_ROUTINE_KIND_METHOD
+    "function",           // = COMPILER_CODE_GEN_ROUTINE_KIND_FUNCTION
+    "_error_",            // = COMPILER_CODE_GEN_ROUTINE_KIND_ERROR
+};
+
+uint8_t compiler_code_gen_get_routine_kind(struct compiler_parser_elem* fun_elem)
+{
+    uint8_t routine_kind = COMPILER_CODE_GEN_ROUTINE_KIND_ERROR;
+    
+    if (fun_elem == NULL ||
+        fun_elem->type != COMPILER_PARSER_ELEM_SUBROUTINE_DEC) {
+        return routine_kind;
+    }
+
+    if (fun_elem->child != NULL /* kind */ &&
+        COMPILER_TOKEN_NAME_KEYWORD == fun_elem->child->token.type) {
+        //
+        uint8_t type = compiler_get_keyword_type(fun_elem->child->token.token);
+        switch (type) {
+            case COMPILER_KEYWORD_CONSTRUCTOR:
+                routine_kind = COMPILER_CODE_GEN_ROUTINE_KIND_CONSTRUCTOR;
+                break;
+            case COMPILER_KEYWORD_METHOD:
+                routine_kind = COMPILER_CODE_GEN_ROUTINE_KIND_METHOD;
+                break;
+            case COMPILER_KEYWORD_FUNCTION:
+                routine_kind = COMPILER_CODE_GEN_ROUTINE_KIND_FUNCTION;
+                break;
+        }
+    }
+
+    return routine_kind;
+}
+
 token_t* compiler_code_gen_get_next_fun(struct compiler_parser_elem** p_fun_elem)
 {
     if ((*p_fun_elem) == NULL) {
@@ -4583,18 +4826,21 @@ int compiler_gen_code_parse_fun_var(struct compiler_parser_elem** p_parse_elem,
     if (*p_parse_elem == NULL)
         return 0;
 
-    if ((*p_parse_elem)->type == COMPILER_PARSER_ELEM_SUBROUTINE_DEC)
+    if ((*p_parse_elem)->type == COMPILER_PARSER_ELEM_SUBROUTINE_DEC) {
+        //
         *p_parse_elem = (*p_parse_elem)->child;
 
-    while (*p_parse_elem != NULL) {
-        if ((*p_parse_elem)->type == COMPILER_PARSER_ELEM_SUBROUTINE_BODY)
-            break;
-        *p_parse_elem = (*p_parse_elem)->next;
-    }
-    if (*p_parse_elem == NULL)
-        return 0;
+        while (*p_parse_elem != NULL) {
+            if ((*p_parse_elem)->type == COMPILER_PARSER_ELEM_SUBROUTINE_BODY)
+               break;
+            *p_parse_elem = (*p_parse_elem)->next;
+        }
+        if (*p_parse_elem == NULL)
+            return 0;
 
-    *p_parse_elem = (*p_parse_elem)->child;
+        *p_parse_elem = (*p_parse_elem)->child;
+    }
+
     while (*p_parse_elem != NULL) {
         if ((*p_parse_elem)->type == COMPILER_PARSER_ELEM_VAR_DEC)
             break;
@@ -4663,6 +4909,368 @@ int compiler_gen_code_parse_fun_var(struct compiler_parser_elem** p_parse_elem,
 
     *p_parse_elem = (*p_parse_elem)->next;
     return n;
+}
+
+// TODO to top
+int compiler_code_gen_vm_expression(char* class_name,
+                                    char* fun_name,
+                                    uint8_t routine_kind,
+                                    struct compiler_parser_elem* expression_elem,
+                                    struct compiler_code_var_table* var_class_table,
+                                    struct compiler_code_var_table* var_subroutine_table,
+                                    int n_class_field,
+                                    int n_fun_var,
+                                    FILE* out_file);
+
+int compiler_code_gen_vm_term(char* class_name,
+                              char* fun_name,
+                              uint8_t routine_kind,
+                              struct compiler_parser_elem* term_elem,
+                              struct compiler_code_var_table* var_class_table,
+                              struct compiler_code_var_table* var_subroutine_table,
+                              int n_class_field,
+                              int n_fun_var,
+                              FILE* out_file)
+{
+    // term: intConstant | stringConstant | keywordConstant | varName | '(' expression ')' |
+    //       varName '[' expression ']' | (unaryOp term) | subroutineCall
+
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// term\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+int compiler_code_gen_vm_expression(char* class_name,
+                                    char* fun_name,
+                                    uint8_t routine_kind,
+                                    struct compiler_parser_elem* expression_elem,
+                                    struct compiler_code_var_table* var_class_table,
+                                    struct compiler_code_var_table* var_subroutine_table,
+                                    int n_class_field,
+                                    int n_fun_var,
+                                    FILE* out_file)
+{
+    // expression: term (op term)*
+
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// expression\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+// TODO to top
+int compiler_code_gen_vm_statements(char* class_name,
+                                    char* fun_name,
+                                    uint8_t routine_kind,
+                                    struct compiler_parser_elem* statements_elem,
+                                    struct compiler_code_var_table* var_class_table,
+                                    struct compiler_code_var_table* var_subroutine_table,
+                                    int n_class_field,
+                                    int n_fun_var,
+                                    FILE* out_file);
+
+int compiler_code_gen_vm_let_statement(char* class_name,
+                                       char* fun_name,
+                                       uint8_t routine_kind,
+                                       struct compiler_parser_elem* statement_elem,
+                                       struct compiler_code_var_table* var_class_table,
+                                       struct compiler_code_var_table* var_subroutine_table,
+                                       int n_class_field,
+                                       int n_fun_var,
+                                       FILE* out_file)
+{
+    // letStatement: 'let' varName ( '[' expression ']' )? '=' expression ';'
+
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// let statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+int compiler_code_gen_vm_if_statement(char* class_name,
+                                      char* fun_name,
+                                      uint8_t routine_kind,
+                                      struct compiler_parser_elem* statement_elem,
+                                      struct compiler_code_var_table* var_class_table,
+                                      struct compiler_code_var_table* var_subroutine_table,
+                                      int n_class_field,
+                                      int n_fun_var,
+                                      FILE* out_file)
+{
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// if statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+int compiler_code_gen_vm_while_statement(char* class_name,
+                                         char* fun_name,
+                                         uint8_t routine_kind,
+                                         struct compiler_parser_elem* statement_elem,
+                                         struct compiler_code_var_table* var_class_table,
+                                         struct compiler_code_var_table* var_subroutine_table,
+                                         int n_class_field,
+                                         int n_fun_var,
+                                         FILE* out_file)
+{
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// while statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+int compiler_code_gen_vm_do_statement(char* class_name,
+                                      char* fun_name,
+                                      uint8_t routine_kind,
+                                      struct compiler_parser_elem* statement_elem,
+                                      struct compiler_code_var_table* var_class_table,
+                                      struct compiler_code_var_table* var_subroutine_table,
+                                      int n_class_field,
+                                      int n_fun_var,
+                                      FILE* out_file)
+{
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// do statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+int compiler_code_gen_vm_return_statement(char* class_name,
+                                          char* fun_name,
+                                          uint8_t routine_kind,
+                                          struct compiler_parser_elem* statement_elem,
+                                          struct compiler_code_var_table* var_class_table,
+                                          struct compiler_code_var_table* var_subroutine_table,
+                                          int n_class_field,
+                                          int n_fun_var,
+                                          FILE* out_file)
+{
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// return statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+
+int compiler_code_gen_vm_statement(char* class_name,
+                                   char* fun_name,
+                                   uint8_t routine_kind,
+                                   struct compiler_parser_elem* statement_elem,
+                                   struct compiler_code_var_table* var_class_table,
+                                   struct compiler_code_var_table* var_subroutine_table,
+                                   int n_class_field,
+                                   int n_fun_var,
+                                   FILE* out_file)
+{
+    // statement: letStatement | ifStatement | whileStatement | doStatement | returnStatement
+
+    if (statement_elem == NULL) {
+        printf("Compiler code gen vm subroutine - err NULL statement parse elem.\n");
+        return -1;
+    }
+
+    int (*p_vm_statement) (char* class_name,
+                           char* fun_name,
+                           uint8_t routine_kind,
+                           struct compiler_parser_elem* statement_elem,
+                           struct compiler_code_var_table* var_class_table,
+                           struct compiler_code_var_table* var_subroutine_table,
+                           int n_class_field,
+                           int n_fun_var,
+                           FILE* out_file) = NULL;
+
+    switch (statement_elem->type) {
+        case COMPILER_PARSER_ELEM_LET_STATEMENT:
+            p_vm_statement = compiler_code_gen_vm_let_statement;
+            break;
+        case COMPILER_PARSER_ELEM_IF_STATEMENT:
+            p_vm_statement = compiler_code_gen_vm_if_statement;
+            break;
+        case COMPILER_PARSER_ELEM_WHILE_STATEMENT:
+            p_vm_statement = compiler_code_gen_vm_while_statement;
+            break;
+        case COMPILER_PARSER_ELEM_DO_STATEMENT:
+            p_vm_statement = compiler_code_gen_vm_do_statement;
+            break;
+        case COMPILER_PARSER_ELEM_RETURN_STATEMENT:
+            p_vm_statement = compiler_code_gen_vm_return_statement;
+            break;
+        default:
+            break;
+    }
+
+    if (p_vm_statement == NULL) {
+        printf("Compiler code gen vm subroutine - err unknown %d statement type in parse elem.\n", statement_elem->type);
+        return -1;
+    }
+
+    if (p_vm_statement(class_name,
+                       fun_name,
+                       routine_kind,
+                       statement_elem,
+                       var_class_table,
+                       var_subroutine_table,
+                       n_class_field,
+                       n_fun_var,
+                       out_file) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int compiler_code_gen_vm_statements(char* class_name,
+                                    char* fun_name,
+                                    uint8_t routine_kind,
+                                    struct compiler_parser_elem* statements_elem,
+                                    struct compiler_code_var_table* var_class_table,
+                                    struct compiler_code_var_table* var_subroutine_table,
+                                    int n_class_field,
+                                    int n_fun_var,
+                                    FILE* out_file)
+{
+    // statements: statement*
+
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// statements\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (statements_elem == NULL) {
+        printf("Compiler code gen vm subroutine - err NULL statements parse elem.\n");
+        return -1;
+    }
+    if (statements_elem->type != COMPILER_PARSER_ELEM_STATEMENTS) {
+        printf("Compiler code gen vm subroutine - err not statements in statement parse elem.\n");
+        return -1;
+    }
+    statements_elem = statements_elem->child;
+
+    while (statements_elem != NULL) {
+        if (compiler_code_gen_vm_statement(class_name,
+                                           fun_name,
+                                           routine_kind,
+                                           statements_elem,
+                                           var_class_table,
+                                           var_subroutine_table,
+                                           n_class_field,
+                                           n_fun_var,
+                                           out_file) < 0) {
+            return -1;
+        }
+        statements_elem = statements_elem->next;
+    }
+
+    return 0;
+}
+
+int compiler_code_gen_vm_routine(char* class_name,
+                                 char* fun_name,
+                                 uint8_t routine_kind,
+                                 struct compiler_parser_elem* fun_elem,
+                                 struct compiler_code_var_table* var_class_table,
+                                 struct compiler_code_var_table* var_subroutine_table,
+                                 int n_class_field,
+                                 int n_fun_var,
+                                 FILE* out_file)
+{
+    char print_line[2048+1];
+
+    // function
+    sprintf(print_line, "function %s.%s %d\n",
+                class_name,
+                fun_name,
+                n_fun_var);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (COMPILER_CODE_GEN_ROUTINE_KIND_CONSTRUCTOR == routine_kind) {
+        sprintf(print_line, "// constructor\n"
+                            "push constant %d\n"
+                            "call Memory.alloc 1\n"
+                            "pop pointer 0\n",
+                n_class_field);
+    } else if (COMPILER_CODE_GEN_ROUTINE_KIND_METHOD == routine_kind) {
+        sprintf(print_line, "// method\n"
+                            "push argument 0\n"
+                            "pop pointer 0\n");
+    } else if (COMPILER_CODE_GEN_ROUTINE_KIND_FUNCTION == routine_kind) {
+            sprintf(print_line, "// function\n");
+    } else {
+        sprintf(print_line, "// Unknown kind\n");
+    }
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    // subroutineBody: '{' varDec* statements '}'
+    
+    if (fun_elem == NULL) {
+        printf("Compiler code gen vm subroutine - err NULL fun parse elem.\n");
+        return -1;
+    }
+    if (fun_elem->type != COMPILER_PARSER_ELEM_SUBROUTINE_DEC) {
+        printf("Compiler code gen vm subroutine - err not subroutineDec in fun parse elem.\n");
+        return -1;
+    }
+    fun_elem = fun_elem->child;
+
+    while (fun_elem != NULL) {
+        if (fun_elem->type == COMPILER_PARSER_ELEM_SUBROUTINE_BODY)
+               break;
+        fun_elem = fun_elem->next;
+    }
+    if (fun_elem == NULL) {
+        printf("Compiler code gen vm subroutine - err not subroutineBody in fun parse elem.\n");
+        return -1;
+    }
+    fun_elem = fun_elem->child;
+
+    while (fun_elem != NULL) {
+        if (fun_elem->type == COMPILER_PARSER_ELEM_STATEMENTS)
+               break;
+        fun_elem = fun_elem->next;
+    }
+    if (fun_elem == NULL) {
+        printf("Compiler code gen vm subroutine - err not statements in fun parse elem.\n");
+        return -1;
+    }
+
+    if (compiler_code_gen_vm_statements(class_name,
+                                        fun_name,
+                                        routine_kind,
+                                        fun_elem,
+                                        var_class_table,
+                                        var_subroutine_table,
+                                        n_class_field,
+                                        n_fun_var,
+                                        out_file) < 0) {
+        return -1;
+    }
+
+    sprintf(print_line, "\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    return 0;
 }
 
 int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
@@ -4756,7 +5364,7 @@ int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
         int i = 0;
         if (compiler_parse_class(&tokens, &i, &class_elem) < 0) {
             printf("compiler: error parse class\n");
-            goto err;
+            ///TODO goto err;
         }
     }
 
@@ -4798,13 +5406,26 @@ int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
             }
         }
         
+        if (out_format == COMPILER_OUT_FORMAT_VM) {
+                // File, class name
+                sprintf(print_line, "// compile code gen, fileName=%s, className=%s\n",
+                              jack_file_name,
+                              class_name_token->token);
+                fwrite(print_line, 1, strlen(print_line), out_file);
+                //
+        }
+        
         // Function tables.
         token_t* fun_name_token;
         struct compiler_parser_elem* fun_elem = class_elem;
         while ((fun_name_token = compiler_code_gen_get_next_fun(&fun_elem)) != NULL) {
-        
+            //
+            uint8_t routine_kind = compiler_code_gen_get_routine_kind(fun_elem);
+            //
             if (out_format == COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE) {
-                sprintf(print_line, "\n\tfunction %16s() symbol table:\n", fun_name_token->token);
+                sprintf(print_line, "\n\troutine %10s %16s() symbol table:\n",
+                            compiler_code_gen_routine_ar_kind_name[routine_kind],
+                            fun_name_token->token);
                 fwrite(print_line, 1, strlen(print_line), out_file);
             }
 
@@ -4827,13 +5448,28 @@ int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
                 int i = 0;
                 struct compiler_code_gen_var* var;
                 while ((var = compiler_code_gen_get_from_var_table(&compiler_code_var_subroutine_table, i)) != NULL) {
-                    sprintf(print_line, "\t\t%3d %32s %16s %10s %8d\n", i, 
+                    sprintf(print_line, "\t\t%3d %32s %16s %10s %8d\n", i,
                               var->name,
                               var->type,
                               compiler_code_gen_var_ar_kind_name[var->kind],
                               var->num);
                      fwrite(print_line, 1, strlen(print_line), out_file);
                      ++i;
+                }
+            }
+
+            if (out_format == COMPILER_OUT_FORMAT_VM) {
+                // Routine
+                if (compiler_code_gen_vm_routine(class_name_token->token,
+                                                 fun_name_token->token,
+                                                 routine_kind,
+                                                 fun_elem,
+                                                 &compiler_code_var_class_table,
+                                                 &compiler_code_var_subroutine_table,
+                                                 n_field,
+                                                 n_local,
+                                                 out_file) < 0) {
+                    goto err;
                 }
             }
         }
@@ -5300,21 +5936,25 @@ int main()
 	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "MainT.xml");
 	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Main.xml");
 	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Main.symbol_table");
+	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_VM, "Main.vm");
 #endif
 	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_STRIP, "Square.jack_strip");
 	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareT.xml");
 	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Square.xml");
 	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Square.symbol_table");
+	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_VM, "Square.vm");
 #if 1
 	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_STRIP, "SquareGame.jack_strip");
 	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareGameT.xml");
 	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_XML_PARSER, "SquareGame.xml");
 	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "SquareGame.symbol_table");
+	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_VM, "SquareGame.vm");
 	    
 	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_STRIP, "Main2.jack_strip");
 	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "Main2T.xml");
 	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Main2.xml");
 	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Main2.symbol_table");
+	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_VM, "Main2.vm");
 #endif
 	    // TODO
 	    return 0;
