@@ -5034,6 +5034,57 @@ int compiler_code_gen_vm_expression(char* class_name,
                                     int n_fun_var,
                                     FILE* out_file);
 
+int compiler_code_gen_vm_op(char* class_name,
+                            char* fun_name,
+                            uint8_t routine_kind,
+                            struct compiler_parser_elem* op_elem,
+                            struct compiler_code_var_table* var_class_table,
+                            struct compiler_code_var_table* var_subroutine_table,
+                            int n_class_field,
+                            int n_fun_var,
+                            FILE* out_file)
+{
+    char print_line[2048+1];
+
+    //
+    if (!strcmp("+", op_elem->token.token))
+        sprintf(print_line, "add\n");
+    else if (!strcmp("-", op_elem->token.token))
+        sprintf(print_line, "sub\n");
+    else if (!strcmp("&", op_elem->token.token))
+        sprintf(print_line, "and\n");
+    else if (!strcmp("|", op_elem->token.token))
+        sprintf(print_line, "or\n");
+    else if (!strcmp("<", op_elem->token.token))
+        sprintf(print_line, "lt\n");
+    else if (!strcmp(">", op_elem->token.token))
+        sprintf(print_line, "gt\n");
+    else if (!strcmp("=", op_elem->token.token))
+        sprintf(print_line, "eq\n");
+    else if (!strcmp("*", op_elem->token.token))
+        sprintf(print_line, "//TODO Multiply\n");
+    else if (!strcmp("/", op_elem->token.token))
+        sprintf(print_line, "//TODO Div\n");
+    else {
+        printf("Compiler code gen vm op - err unknown op = %s\n", op_elem->token.token);
+        return -1;
+    }
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+// TODO top
+int compiler_code_gen_vm_subroutine_call(char* class_name,
+                                         char* fun_name,
+                                         uint8_t routine_kind,
+                                         struct compiler_parser_elem* subroutine_elem,
+                                         struct compiler_code_var_table* var_class_table,
+                                         struct compiler_code_var_table* var_subroutine_table,
+                                         int n_class_field,
+                                         int n_fun_var,
+                                         FILE* out_file);
+
 int compiler_code_gen_vm_term(char* class_name,
                               char* fun_name,
                               uint8_t routine_kind,
@@ -5053,6 +5104,72 @@ int compiler_code_gen_vm_term(char* class_name,
     sprintf(print_line, "// term\n");
     fwrite(print_line, 1, strlen(print_line), out_file);
 
+    if (term_elem == NULL) {
+        printf("Compiler code gen vm term - err NULL parse elem.\n");
+        return -1;
+    }
+    if (term_elem->type != COMPILER_PARSER_ELEM_TERM) {
+        printf("Compiler code gen vm term - err not term in parse elem.\n");
+        return -1;
+    }
+    term_elem = term_elem->child;
+
+    if (term_elem == NULL) {
+        printf("Compiler code gen vm term - err empty parse elem.\n");
+        return -1;
+    }
+
+    
+    if (term_elem->next == NULL) {
+        // Only one token
+        if (term_elem->type != COMPILER_PARSER_ELEM_TOKEN) {
+            printf("Compiler code gen vm term - err expect token.\n");
+            return -1;
+        }
+        if (term_elem->token.type == COMPILER_TOKEN_NAME_INT_CONST) {
+            sprintf(print_line, "push constant %s\n", term_elem->token.token);
+            fwrite(print_line, 1, strlen(print_line), out_file);
+        }
+        else if (term_elem->token.type == COMPILER_TOKEN_NAME_IDENTIFIER) {
+            char* var_name = term_elem->token.token;
+            struct compiler_code_gen_var* var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
+            if (var == NULL) {
+                printf("Compiler code gen vm term - unknown varName = %s.\n", var_name);
+                return -1;
+            }
+
+            if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
+                return -1;
+        }
+        else {
+            sprintf(print_line, "// TODO keyword const\n");
+            fwrite(print_line, 1, strlen(print_line), out_file);
+        }
+    }
+    else {
+        if (term_elem->next->type == COMPILER_PARSER_ELEM_TOKEN &&
+            term_elem->next->token.type == COMPILER_TOKEN_NAME_SYMBOL &&
+            ((!strcmp(".", term_elem->next->token.token)) ||
+             (!strcmp("(", term_elem->next->token.token)))) {
+            //
+            if (compiler_code_gen_vm_subroutine_call(class_name,
+                                                     fun_name,
+                                                     routine_kind,
+                                                     term_elem,
+                                                     var_class_table,
+                                                     var_subroutine_table,
+                                                     n_class_field,
+                                                     n_fun_var,
+                                                     out_file) < 0) {
+                return -1;
+            }
+        }
+        else {
+             sprintf(print_line, "// TODO complex term\n");
+             fwrite(print_line, 1, strlen(print_line), out_file);
+        }
+    }
+
     return 0;
 }
 
@@ -5067,11 +5184,236 @@ int compiler_code_gen_vm_expression(char* class_name,
                                     FILE* out_file)
 {
     // expression: term (op term)*
-
+    int n_term = 0;
     char print_line[2048+1];
 
     //
     sprintf(print_line, "// expression\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (expression_elem == NULL) {
+        printf("Compiler code gen vm expression - err NULL parse elem.\n");
+        return -1;
+    }
+    if (expression_elem->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+        printf("Compiler code gen vm expression - err not expression in parse elem.\n");
+        return -1;
+    }
+    expression_elem = expression_elem->child;
+
+    do {
+        if (n_term > 0) {
+            if (expression_elem == NULL)
+                return 0;
+            if (expression_elem->type != COMPILER_PARSER_ELEM_TOKEN &&
+                compiler_is_token_op(&(expression_elem->token))) {
+                printf("Compiler code gen vm expression - err expected op.\n");
+                return -1;
+            }
+
+            // Will be done after the next expression
+
+            expression_elem = expression_elem->next;
+        }
+
+        if (expression_elem == NULL || expression_elem->type != COMPILER_PARSER_ELEM_TERM) {
+           printf("Compiler code gen vm expression - err term op.\n");
+           return -1;
+        }
+
+        if (compiler_code_gen_vm_term(class_name,
+                                      fun_name,
+                                      routine_kind,
+                                      expression_elem,
+                                      var_class_table,
+                                      var_subroutine_table,
+                                      n_class_field,
+                                      n_fun_var,
+                                      out_file) < 0) {
+            return -1;
+        }
+
+        if (n_term > 0) {
+            // Op that was before this expression,
+            if (compiler_code_gen_vm_op(class_name,
+                                        fun_name,
+                                        routine_kind,
+                                        expression_elem->prev,
+                                        var_class_table,
+                                        var_subroutine_table,
+                                        n_class_field,
+                                        n_fun_var,
+                                        out_file) < 0) {
+                return -1;
+            }
+        }
+
+        expression_elem = expression_elem->next;
+        ++n_term;
+    }
+    while (expression_elem != NULL);
+
+    return 0;
+}
+
+int compiler_code_gen_vm_expression_list(char* class_name,
+                                         char* fun_name,
+                                         uint8_t routine_kind,
+                                         struct compiler_parser_elem* expression_list_elem,
+                                         struct compiler_code_var_table* var_class_table,
+                                         struct compiler_code_var_table* var_subroutine_table,
+                                         int n_class_field,
+                                         int n_fun_var,
+                                         FILE* out_file)
+{
+    // expression: term (op term)*
+    int n_exps = 0;
+    char print_line[2048+1];
+
+    //
+    sprintf(print_line, "// expression list\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (expression_list_elem == NULL) {
+        printf("Compiler code gen vm expression list - err NULL parse elem.\n");
+        return -1;
+    }
+    if (expression_list_elem->type != COMPILER_PARSER_ELEM_EXPRESSION_LIST) {
+        printf("Compiler code gen vm expression list - err not expression list in parse elem.\n");
+        return -1;
+    }
+    expression_list_elem = expression_list_elem->child;
+
+
+    while (expression_list_elem != NULL) {
+        //
+        if (n_exps > 0) {
+           if (expression_list_elem->type == COMPILER_PARSER_ELEM_TOKEN &&
+               (!strcmp(",", expression_list_elem->token.token))) {
+               //
+               expression_list_elem = expression_list_elem->next;
+            }
+        }
+
+        if (expression_list_elem == NULL || expression_list_elem->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+           printf("Compiler code gen vm expression list - err expected expression.\n");
+           return -1;
+        }
+        
+        if (compiler_code_gen_vm_expression(class_name,
+                                            fun_name,
+                                            routine_kind,
+                                            expression_list_elem,
+                                            var_class_table,
+                                            var_subroutine_table,
+                                            n_class_field,
+                                            n_fun_var,
+                                            out_file) < 0) {
+            return -1;
+        }
+    
+        ++n_exps;
+        expression_list_elem = expression_list_elem->next;
+    }
+
+    return n_exps;
+}
+
+int compiler_code_gen_vm_subroutine_call(char* class_name,
+                                         char* fun_name,
+                                         uint8_t routine_kind,
+                                         struct compiler_parser_elem* subroutine_elem,
+                                         struct compiler_code_var_table* var_class_table,
+                                         struct compiler_code_var_table* var_subroutine_table,
+                                         int n_class_field,
+                                         int n_fun_var,
+                                         FILE* out_file)
+{
+    // subroutineCall: subroutineName '(' expressionList ')' | (className | varName) '.' subroutineName '(' expressionList ')'
+    char print_line[2048+1];
+    struct compiler_code_gen_var* var = NULL;
+    char* fun_class_name = NULL;
+    char* subroutine_name = NULL;
+
+    //
+    sprintf(print_line, "// subroutine call\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (subroutine_elem == NULL ||
+        subroutine_elem->next == NULL ||
+        subroutine_elem->next->next == NULL ) {
+        printf("Compiler code gen vm subroutine call - err < 3 elems.\n");
+        return -1;
+    }
+
+    if (subroutine_elem->type != COMPILER_PARSER_ELEM_TOKEN &&
+        subroutine_elem->token.type != COMPILER_TOKEN_NAME_IDENTIFIER) {
+        printf("Compiler code gen vm subroutine call - err expected Name elems.\n");
+        return -1;
+    }
+
+    if (subroutine_elem->next->type == COMPILER_PARSER_ELEM_TOKEN &&
+        subroutine_elem->next->token.type == COMPILER_TOKEN_NAME_SYMBOL &&
+        (!strcmp(".", subroutine_elem->next->token.token))) {
+        // class or var name
+        char* var_name = subroutine_elem->token.token;
+        var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
+        if (var == NULL) {
+            // class Name
+            fun_class_name = var_name;
+        }
+        else {
+            fun_class_name = var->type;
+        }
+        // skip field call
+        subroutine_elem = subroutine_elem->next->next;
+    }
+
+    if (subroutine_elem->type != COMPILER_PARSER_ELEM_TOKEN &&
+        subroutine_elem->token.type != COMPILER_TOKEN_NAME_IDENTIFIER) {
+        printf("Compiler code gen vm subroutine call - err expected Name elems.\n");
+        return -1;
+    }
+    subroutine_name = subroutine_elem->token.token;
+    subroutine_elem = subroutine_elem->next;
+
+    if (subroutine_elem == NULL ||
+        subroutine_elem->next == NULL ||
+        subroutine_elem->next->next == NULL ) {
+        printf("Compiler code gen vm subroutine call - err not call elems.\n");
+        return -1;
+    }
+
+    if (var != NULL) {
+        // Add this
+        if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0) {
+            return -1;
+        }
+    }
+
+    if (subroutine_elem->next->type != COMPILER_PARSER_ELEM_EXPRESSION_LIST) {
+        printf("Compiler code gen vm subroutine call - err expected Name expression list.\n");
+        return -1;
+    }
+
+    int n_exps = 0;
+    if ((n_exps = compiler_code_gen_vm_expression_list(class_name,
+                                                       fun_name,
+                                                       routine_kind,
+                                                       subroutine_elem->next,
+                                                       var_class_table,
+                                                       var_subroutine_table,
+                                                       n_class_field,
+                                                       n_fun_var,
+                                                       out_file)) < 0) {
+        return -1;
+    }
+
+    // vm call
+    sprintf(print_line, "call %s.%s %d\n",
+            (fun_class_name != NULL) ? fun_class_name : class_name,
+            subroutine_name,
+            n_exps + ((var != NULL) ? 1 : 0));
     fwrite(print_line, 1, strlen(print_line), out_file);
 
     return 0;
@@ -5086,7 +5428,9 @@ int compiler_code_gen_vm_statements(char* class_name,
                                     struct compiler_code_var_table* var_subroutine_table,
                                     int n_class_field,
                                     int n_fun_var,
-                                    FILE* out_file);
+                                    FILE* out_file,
+                                    int* n_if_label,
+                                    int* n_while);
 
 int compiler_code_gen_vm_let_statement(char* class_name,
                                        char* fun_name,
@@ -5096,7 +5440,9 @@ int compiler_code_gen_vm_let_statement(char* class_name,
                                        struct compiler_code_var_table* var_subroutine_table,
                                        int n_class_field,
                                        int n_fun_var,
-                                       FILE* out_file)
+                                       FILE* out_file,
+                                       int* n_if_label,
+                                       int* n_while_label)
 {
     // letStatement: 'let' varName ( '[' expression ']' )? '=' expression ';'
 
@@ -5177,12 +5523,136 @@ int compiler_code_gen_vm_if_statement(char* class_name,
                                       struct compiler_code_var_table* var_subroutine_table,
                                       int n_class_field,
                                       int n_fun_var,
-                                      FILE* out_file)
+                                      FILE* out_file,
+                                      int* n_if_label,
+                                      int* n_while_label)
 {
+    // ifStatement: 'if' '(' expression ')' '{' statements '}' ('else' '{' statements '}')?
+
     char print_line[2048+1];
 
     //
     sprintf(print_line, "// if statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (statement_elem == NULL) {
+        printf("Compiler code gen vm if statement - err NULL  parse elem.\n");
+        return -1;
+    }
+    if (statement_elem->type != COMPILER_PARSER_ELEM_IF_STATEMENT) {
+        printf("Compiler code gen vm if statement - err not if statement in parse elem.\n");
+        return -1;
+    }
+    statement_elem = statement_elem->child;
+
+    if (statement_elem == NULL ||
+        statement_elem->next == NULL ||
+        statement_elem->next->next == NULL ||
+        statement_elem->next->next->next == NULL ||
+        statement_elem->next->next->next->next == NULL ||
+        statement_elem->next->next->next->next->next == NULL) {
+        printf("Compiler code gen vm if statement - err < 6 elems.\n");
+        return -1;
+    }
+
+    struct compiler_parser_elem* expression_elem = statement_elem->next->next;
+    if (statement_elem->next->next->type != COMPILER_PARSER_ELEM_EXPRESSION ) {
+        printf("Compiler code gen vm if statement - err expected expression.\n");
+        return -1;
+    }
+
+    struct compiler_parser_elem* statements1_elem = statement_elem->next->next->next->next->next;
+    if (statements1_elem->type != COMPILER_PARSER_ELEM_STATEMENTS ) {
+        printf("Compiler code gen vm if statement - err expected statements.\n");
+        return -1;
+    }
+
+    struct compiler_parser_elem* statements2_elem = NULL;
+
+    if (statements1_elem->next != NULL &&
+        statements1_elem->next->next != NULL && 
+        statements1_elem->next->next->type == COMPILER_PARSER_ELEM_TOKEN &&
+        statements1_elem->next->next->token.type == COMPILER_TOKEN_NAME_KEYWORD &&
+        compiler_get_keyword_type(statements1_elem->next->next->token.token)) {
+        // else
+        if (statements1_elem->next->next->next == NULL ||
+            statements1_elem->next->next->next->next == NULL) {
+            printf("Compiler code gen vm if statement - err expected statements after 'else'\n");
+            return -1;
+        }
+        statements2_elem = statements1_elem->next->next->next->next;
+        if (statements1_elem->type != COMPILER_PARSER_ELEM_STATEMENTS ) {
+            printf("Compiler code gen vm if statement - err expected statements after 'else'\n");
+            return -1;
+        }
+    }
+
+   /*
+    *    vm(expression)
+    *    not
+    *    if-goto IF_FALSE
+    *    vm(statements1)
+    *    goto IF_END
+    *  label IF_FALSE
+    *    vm(statements2)
+    *  label IF_END
+    */
+    int n = (*n_if_label)++;
+    if (compiler_code_gen_vm_expression(class_name,
+                                       fun_name,
+                                       routine_kind,
+                                       expression_elem,
+                                       var_class_table,
+                                       var_subroutine_table,
+                                       n_class_field,
+                                       n_fun_var,
+                                       out_file) < 0) {
+        return -1;
+    }
+    //
+    sprintf(print_line, "not\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    sprintf(print_line, "if-goto IF_FALSE.%d\n", n);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    if (compiler_code_gen_vm_statements(class_name,
+                                        fun_name,
+                                        routine_kind,
+                                        statements1_elem,
+                                        var_class_table,
+                                        var_subroutine_table,
+                                        n_class_field,
+                                        n_fun_var,
+                                        out_file,
+                                        n_if_label,
+                                        n_while_label) < 0) {
+        return -1;
+    }
+    //
+    sprintf(print_line, "goto IF_END.%d\n", n);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    sprintf(print_line, "label IF_FALSE.%d\n", n);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    if (statements2_elem != NULL) {
+        if (compiler_code_gen_vm_statements(class_name,
+                                            fun_name,
+                                            routine_kind,
+                                            statements2_elem,
+                                            var_class_table,
+                                            var_subroutine_table,
+                                            n_class_field,
+                                            n_fun_var,
+                                            out_file,
+                                            n_if_label,
+                                            n_while_label) < 0) {
+            return -1;
+        }
+    }
+    //
+    sprintf(print_line, "label IF_END.%d\n", n);
     fwrite(print_line, 1, strlen(print_line), out_file);
 
     return 0;
@@ -5196,12 +5666,99 @@ int compiler_code_gen_vm_while_statement(char* class_name,
                                          struct compiler_code_var_table* var_subroutine_table,
                                          int n_class_field,
                                          int n_fun_var,
-                                         FILE* out_file)
+                                         FILE* out_file,
+                                         int* n_if_label,
+                                         int* n_while_label)
 {
+    // whileStatement: 'while' '(' expression ')' '{' statements '}'
     char print_line[2048+1];
 
     //
     sprintf(print_line, "// while statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (statement_elem == NULL) {
+        printf("Compiler code gen vm while statement - err NULL  parse elem.\n");
+        return -1;
+    }
+    if (statement_elem->type != COMPILER_PARSER_ELEM_WHILE_STATEMENT) {
+        printf("Compiler code gen vm while statement - err not while statement in parse elem.\n");
+        return -1;
+    }
+    statement_elem = statement_elem->child;
+
+    if (statement_elem == NULL ||
+        statement_elem->next == NULL ||
+        statement_elem->next->next == NULL ||
+        statement_elem->next->next->next == NULL ||
+        statement_elem->next->next->next->next == NULL ||
+        statement_elem->next->next->next->next->next == NULL) {
+        printf("Compiler code gen vm while statement - err < 6 elems.\n");
+        return -1;
+    }
+
+    struct compiler_parser_elem* expression_elem = statement_elem->next->next;
+    if (statement_elem->next->next->type != COMPILER_PARSER_ELEM_EXPRESSION ) {
+        printf("Compiler code gen vm whiel statement - err expected expression.\n");
+        return -1;
+    }
+
+    struct compiler_parser_elem* statements_elem = statement_elem->next->next->next->next->next;
+    if (statements_elem->type != COMPILER_PARSER_ELEM_STATEMENTS ) {
+        printf("Compiler code gen vm while statement - err expected statements.\n");
+        return -1;
+    }
+
+   /*
+    *  label WHILE_START
+    *    vm(expression)
+    *    not
+    *    if-goto WHILE_END
+    *    vm(statements)
+    *    goto WHILE_START
+    *  label WHILE_END
+    */
+    int n = (*n_while_label)++;
+    //
+    sprintf(print_line, "label WHILE_START.%d\n", n);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    if (compiler_code_gen_vm_expression(class_name,
+                                       fun_name,
+                                       routine_kind,
+                                       expression_elem,
+                                       var_class_table,
+                                       var_subroutine_table,
+                                       n_class_field,
+                                       n_fun_var,
+                                       out_file) < 0) {
+        return -1;
+    }
+    //
+    sprintf(print_line, "not\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    sprintf(print_line, "if-goto WHILE_END.%d\n", n);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    if (compiler_code_gen_vm_statements(class_name,
+                                        fun_name,
+                                        routine_kind,
+                                        statements_elem,
+                                        var_class_table,
+                                        var_subroutine_table,
+                                        n_class_field,
+                                        n_fun_var,
+                                        out_file,
+                                        n_if_label,
+                                        n_while_label) < 0) {
+        return -1;
+    }
+    //
+    sprintf(print_line, "goto WHILE_START.%d\n", n);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+    //
+    sprintf(print_line, "label WHILE_END.%d\n", n);
     fwrite(print_line, 1, strlen(print_line), out_file);
 
     return 0;
@@ -5215,12 +5772,48 @@ int compiler_code_gen_vm_do_statement(char* class_name,
                                       struct compiler_code_var_table* var_subroutine_table,
                                       int n_class_field,
                                       int n_fun_var,
-                                      FILE* out_file)
+                                      FILE* out_file,
+                                      int* n_if_label,
+                                      int* n_while_label)
 {
+    // doStatement: 'do' subroutineCall ';'
+
     char print_line[2048+1];
 
     //
     sprintf(print_line, "// do statement\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (statement_elem == NULL) {
+        printf("Compiler code gen vm do statement - err NULL  parse elem.\n");
+        return -1;
+    }
+    if (statement_elem->type != COMPILER_PARSER_ELEM_DO_STATEMENT) {
+        printf("Compiler code gen vm do statement - err not do statement in parse elem.\n");
+        return -1;
+    }
+    statement_elem = statement_elem->child;
+
+    if (statement_elem == NULL ||
+        statement_elem->next == NULL ) {
+        printf("Compiler code gen vm do statement - err < 2 elems.\n");
+        return -1;
+    }
+
+    if (compiler_code_gen_vm_subroutine_call(class_name,
+                                             fun_name,
+                                             routine_kind,
+                                             statement_elem->next,
+                                             var_class_table,
+                                             var_subroutine_table,
+                                             n_class_field,
+                                             n_fun_var,
+                                             out_file) < 0) {
+        return -1;
+    }
+
+    // skip value
+    sprintf(print_line, "pop temp\n");
     fwrite(print_line, 1, strlen(print_line), out_file);
 
     return 0;
@@ -5234,7 +5827,9 @@ int compiler_code_gen_vm_return_statement(char* class_name,
                                           struct compiler_code_var_table* var_subroutine_table,
                                           int n_class_field,
                                           int n_fun_var,
-                                          FILE* out_file)
+                                          FILE* out_file,
+                                          int* n_if_label,
+                                          int* n_while_label)
 {
     char print_line[2048+1];
 
@@ -5254,7 +5849,9 @@ int compiler_code_gen_vm_statement(char* class_name,
                                    struct compiler_code_var_table* var_subroutine_table,
                                    int n_class_field,
                                    int n_fun_var,
-                                   FILE* out_file)
+                                   FILE* out_file,
+                                   int* n_if_label,
+                                   int* n_while_label)
 {
     // statement: letStatement | ifStatement | whileStatement | doStatement | returnStatement
 
@@ -5271,7 +5868,9 @@ int compiler_code_gen_vm_statement(char* class_name,
                            struct compiler_code_var_table* var_subroutine_table,
                            int n_class_field,
                            int n_fun_var,
-                           FILE* out_file) = NULL;
+                           FILE* out_file,
+                           int* n_if_label,
+                           int* n_while_label) = NULL;
 
     switch (statement_elem->type) {
         case COMPILER_PARSER_ELEM_LET_STATEMENT:
@@ -5306,7 +5905,9 @@ int compiler_code_gen_vm_statement(char* class_name,
                        var_subroutine_table,
                        n_class_field,
                        n_fun_var,
-                       out_file) < 0) {
+                       out_file,
+                       n_if_label,
+                       n_while_label) < 0) {
         return -1;
     }
 
@@ -5321,7 +5922,9 @@ int compiler_code_gen_vm_statements(char* class_name,
                                     struct compiler_code_var_table* var_subroutine_table,
                                     int n_class_field,
                                     int n_fun_var,
-                                    FILE* out_file)
+                                    FILE* out_file,
+                                    int* n_if_label,
+                                    int* n_while_label)
 {
     // statements: statement*
 
@@ -5350,7 +5953,9 @@ int compiler_code_gen_vm_statements(char* class_name,
                                            var_subroutine_table,
                                            n_class_field,
                                            n_fun_var,
-                                           out_file) < 0) {
+                                           out_file,
+                                           n_if_label,
+                                           n_while_label) < 0) {
             return -1;
         }
         statements_elem = statements_elem->next;
@@ -5367,7 +5972,9 @@ int compiler_code_gen_vm_routine(char* class_name,
                                  struct compiler_code_var_table* var_subroutine_table,
                                  int n_class_field,
                                  int n_fun_var,
-                                 FILE* out_file)
+                                 FILE* out_file,
+                                 int* n_if_label,
+                                 int* n_while_label)
 {
     char print_line[2048+1];
 
@@ -5436,7 +6043,9 @@ int compiler_code_gen_vm_routine(char* class_name,
                                         var_subroutine_table,
                                         n_class_field,
                                         n_fun_var,
-                                        out_file) < 0) {
+                                        out_file,
+                                        n_if_label,
+                                        n_while_label) < 0) {
         return -1;
     }
 
@@ -5632,6 +6241,8 @@ int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
 
             if (out_format == COMPILER_OUT_FORMAT_VM) {
                 // Routine
+                int n_if_label = 0;
+                int n_while_label = 0;
                 if (compiler_code_gen_vm_routine(class_name_token->token,
                                                  fun_name_token->token,
                                                  routine_kind,
@@ -5640,7 +6251,9 @@ int compiler_do(char* jack_file_name, uint8_t out_format, char* out_file_name)
                                                  &compiler_code_var_subroutine_table,
                                                  n_field,
                                                  n_local,
-                                                 out_file) < 0) {
+                                                 out_file,
+                                                 &n_if_label,
+                                                 &n_while_label) < 0) {
                     goto err;
                 }
             }
