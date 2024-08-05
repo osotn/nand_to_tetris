@@ -5831,15 +5831,55 @@ int compiler_code_gen_vm_return_statement(char* class_name,
                                           int* n_if_label,
                                           int* n_while_label)
 {
+    // returnStatement: 'return' expression? ';'
+
     char print_line[2048+1];
 
     //
     sprintf(print_line, "// return statement\n");
     fwrite(print_line, 1, strlen(print_line), out_file);
 
+    if (statement_elem == NULL) {
+        printf("Compiler code gen vm return statement - err NULL  parse elem.\n");
+        return -1;
+    }
+    if (statement_elem->type != COMPILER_PARSER_ELEM_RETURN_STATEMENT) {
+        printf("Compiler code gen vm return statement - err not return statement in parse elem.\n");
+        return -1;
+    }
+    statement_elem = statement_elem->child;
+
+    if (statement_elem == NULL ||
+        statement_elem->next == NULL) {
+        printf("Compiler code gen vm return statement - err < 2 elems.\n");
+        return -1;
+    }
+
+    if (statement_elem->next->type == COMPILER_PARSER_ELEM_EXPRESSION) {
+        if (compiler_code_gen_vm_expression(class_name,
+                                            fun_name,
+                                            routine_kind,
+                                            statement_elem->next,
+                                            var_class_table,
+                                            var_subroutine_table,
+                                            n_class_field,
+                                            n_fun_var,
+                                            out_file) < 0) {
+            return -1;
+        }
+    }
+    else {
+        // without expression
+        sprintf(print_line, "push constant 0\n");
+        fwrite(print_line, 1, strlen(print_line), out_file);
+    }
+
+    // return 
+    sprintf(print_line, "return\n");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
     return 0;
 }
-
 
 int compiler_code_gen_vm_statement(char* class_name,
                                    char* fun_name,
