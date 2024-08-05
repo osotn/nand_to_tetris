@@ -4644,6 +4644,44 @@ struct compiler_code_gen_var {
 
 #define COMPILER_CODE_GEN_VAR_TABLE_MAX_NUM 1024
 
+enum compiler_code_gen_var_section {
+    COMPILER_CODE_GEN_VAR_SECTION_THIS        = 0,
+    COMPILER_CODE_GEN_VAR_SECTION_STATIC      = 1,
+    COMPILER_CODE_GEN_VAR_SECTION_ARGUMENT    = 2,
+    COMPILER_CODE_GEN_VAR_SECTION_LOCAL       = 3,
+
+    COMPILER_CODE_GEN_VAR_SECTION_UNKNOWN     = 4,
+};
+
+char* compiler_code_gen_var_ar_section_name[] = {
+    "this",        // = COMPILER_CODE_GEN_VAR_SECTION_THIS
+    "static",      // = COMPILER_CODE_GEN_VAR_SECTION_STATIC
+    "argument",    // = COMPILER_CODE_GEN_VAR_SECTION_ARGUMENT
+    "local",       // = COMPILER_CODE_GEN_VAR_SECTION_LOCAL
+
+    "unknown",     // = COMPILER_CODE_GEN_VAR_SECTION_UNKNOWN
+};
+
+uint8_t compiler_code_gen_get_var_section(struct compiler_code_gen_var* var) {
+    uint8_t section = COMPILER_CODE_GEN_VAR_SECTION_UNKNOWN;
+    switch (var->kind) {
+        case COMPILER_CODE_GEN_VAR_KIND_FIELD:
+            section = COMPILER_CODE_GEN_VAR_SECTION_THIS;
+            break;
+        case COMPILER_CODE_GEN_VAR_KIND_STATIC:
+            section = COMPILER_CODE_GEN_VAR_SECTION_STATIC;
+            break;
+        case COMPILER_CODE_GEN_VAR_KIND_ARG:
+            section = COMPILER_CODE_GEN_VAR_SECTION_ARGUMENT;
+            break;
+        case COMPILER_CODE_GEN_VAR_KIND_VAR:
+            section = COMPILER_CODE_GEN_VAR_SECTION_LOCAL;
+            break;
+    
+    }
+    return section;
+}
+
 struct compiler_code_var_table {
     struct compiler_code_gen_var symbols[COMPILER_CODE_GEN_VAR_TABLE_MAX_NUM];
     int num;
@@ -4666,6 +4704,80 @@ struct compiler_code_gen_var* compiler_code_gen_get_from_var_table(struct compil
         return NULL;
 
     return &(table->symbols[n]);
+}
+
+struct compiler_code_gen_var* compiler_code_gen_find_from_var_table(struct compiler_code_var_table* table,  char* var_name) {
+    
+    int i = 0;
+    while (i < table->num) {
+        if (!strcmp(var_name, table->symbols[i].name))
+            break;
+        ++i;
+    }
+
+    if (i == table->num)
+        return NULL;
+
+    return &(table->symbols[i]);
+}
+
+struct compiler_code_gen_var* compiler_code_gen_find_fun_var(struct compiler_code_var_table* class_table,
+                                                             struct compiler_code_var_table* fun_table,
+                                                             char* var_name) {
+
+    struct compiler_code_gen_var* var = compiler_code_gen_find_from_var_table(fun_table, var_name);
+
+    if (var != NULL)
+        return var;
+
+    return compiler_code_gen_find_from_var_table(class_table, var_name);
+}
+
+int compiler_code_gen_vm_var(char* class_name,
+                             struct compiler_code_gen_var* var,
+                             FILE* out_file)
+{
+    char print_line[2048+1];
+    uint8_t section = compiler_code_gen_get_var_section(var);
+
+    //
+    sprintf(print_line, " %s",
+                compiler_code_gen_var_ar_section_name[section]);
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    if (section == COMPILER_CODE_GEN_VAR_SECTION_STATIC) {
+        sprintf(print_line, " %s.%s\n",
+                    class_name, var->name);
+    } else {
+        sprintf(print_line, " %d\n", var->num);
+    }
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return 0;
+}
+
+int compiler_code_gen_vm_pop_var(char* class_name,
+                                 struct compiler_code_gen_var* var,
+                                 FILE* out_file)
+{
+    char print_line[2048+1];
+    //
+    sprintf(print_line, "pop");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return compiler_code_gen_vm_var(class_name, var, out_file);
+}
+
+int compiler_code_gen_vm_push_var(char* class_name,
+                                  struct compiler_code_gen_var* var,
+                                  FILE* out_file)
+{
+    char print_line[2048+1];
+    //
+    sprintf(print_line, "push");
+    fwrite(print_line, 1, strlen(print_line), out_file);
+
+    return compiler_code_gen_vm_var(class_name, var, out_file);
 }
 
 int compiler_gen_code_parse_class_var( struct compiler_parser_elem** p_parse_elem,
@@ -4993,6 +5105,66 @@ int compiler_code_gen_vm_let_statement(char* class_name,
     //
     sprintf(print_line, "// let statement\n");
     fwrite(print_line, 1, strlen(print_line), out_file);
+
+
+    if (statement_elem == NULL) {
+        printf("Compiler code gen vm let statement - err NULL  parse elem.\n");
+        return -1;
+    }
+    if (statement_elem->type != COMPILER_PARSER_ELEM_LET_STATEMENT) {
+        printf("Compiler code gen vm let statement - err not let statement in parse elem.\n");
+        return -1;
+    }
+    statement_elem = statement_elem->child;
+
+    if (statement_elem == NULL ||
+        statement_elem->next == NULL ||
+        statement_elem->next->next == NULL ||
+        statement_elem->next->next->next == NULL) {
+        printf("Compiler code gen vm let statement - err < 4 elems.\n");
+        return -1;
+    }
+
+    if (statement_elem->next->next->type == COMPILER_PARSER_ELEM_TOKEN &&
+        statement_elem->next->next->token.type == COMPILER_TOKEN_NAME_SYMBOL &&
+        (!strcmp("[", statement_elem->next->next->token.token))) {
+        sprintf(print_line, "// TODO index var\n");
+        fwrite(print_line, 1, strlen(print_line), out_file);
+        return 0;
+    }
+
+    if (statement_elem->next->next->next->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+        printf("Compiler code gen vm let statement - expected expression.\n");
+        return -1;
+    }
+
+    if (compiler_code_gen_vm_expression(class_name,
+                                        fun_name,
+                                        routine_kind,
+                                        statement_elem->next->next->next,
+                                        var_class_table,
+                                        var_subroutine_table,
+                                        n_class_field,
+                                        n_fun_var,
+                                        out_file) < 0) {
+        return -1;
+    }
+
+    if (statement_elem->next->type != COMPILER_PARSER_ELEM_TOKEN ||
+        statement_elem->next->token.type != COMPILER_TOKEN_NAME_IDENTIFIER) {
+        printf("Compiler code gen vm let statement - expected varName.\n");
+        return -1;
+    }
+    char* var_name = statement_elem->next->token.token;
+
+    struct compiler_code_gen_var* var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
+    if (var == NULL) {
+        printf("Compiler code gen vm let statement - unknown varName = %s.\n", var_name);
+        return -1;
+    }
+
+    if (compiler_code_gen_vm_pop_var(class_name, var, out_file) < 0)
+        return -1;
 
     return 0;
 }
