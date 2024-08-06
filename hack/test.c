@@ -5132,8 +5132,19 @@ int compiler_code_gen_vm_term(char* class_name,
         }
         else if (term_elem->token.type == COMPILER_TOKEN_NAME_STRING_CONST) {
             // stringConstant
-            sprintf(print_line, "// TOOD stringConstant\n");
+            char* str = term_elem->token.token;
+            int   len = (int)strlen(str);
+            //
+            sprintf(print_line, "push constant %d\n"
+                                "call String.new 1\n", len);
             fwrite(print_line, 1, strlen(print_line), out_file);
+            //
+            int i;
+            for (i = 0; i < len; i++) {
+                sprintf(print_line, "push constant %u\n"
+                                    "call String.appendChar 2\n", (unsigned)(str[i]));
+                fwrite(print_line, 1, strlen(print_line), out_file);
+            }
         }
         else if (term_elem->token.type == COMPILER_TOKEN_NAME_KEYWORD &&
                  compiler_is_token_keyword_const(&(term_elem->token))) {
@@ -5156,7 +5167,7 @@ int compiler_code_gen_vm_term(char* class_name,
                 //
                 sprintf(print_line, "push pointer 0\n");
                 fwrite(print_line, 1, strlen(print_line), out_file);
-            } 
+            }
         }
         else if (term_elem->token.type == COMPILER_TOKEN_NAME_IDENTIFIER) {
             // varName
@@ -5166,7 +5177,6 @@ int compiler_code_gen_vm_term(char* class_name,
                 printf("Compiler code gen vm term - unknown varName = %s.\n", var_name);
                 return -1;
             }
-
             if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
                 return -1;
         }
