@@ -5212,13 +5212,40 @@ int compiler_code_gen_vm_term(char* class_name,
         else if (term_elem->next->type == COMPILER_PARSER_ELEM_TOKEN &&
                  (!strcmp("[", term_elem->next->token.token))) {
             // varName '[' expression ']'
-            if (term_elem->next->next != NULL ||
+            if (term_elem->next->next == NULL ||
                 term_elem->next->next->type != COMPILER_PARSER_ELEM_EXPRESSION) {
-                printf("Compiler code gen vm term - err expected term after varName '['.\n");
+                printf("Compiler code gen vm term - err expected expression after varName '['.\n");
                 return -1;
             }
-             sprintf(print_line, "// TODO varName '[' expression ']'.\n");
-             fwrite(print_line, 1, strlen(print_line), out_file);
+            //  - push arr (address in variable)
+            char* var_name = term_elem->token.token;
+            struct compiler_code_gen_var* var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
+            if (var == NULL) {
+                printf("Compiler code gen vm term - unknown varName = %s.\n", var_name);
+                return -1;
+            }
+            if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
+                return -1;
+            //  - push expression
+            if (compiler_code_gen_vm_expression(class_name,
+                                                fun_name,
+                                                routine_kind,
+                                                term_elem->next->next,
+                                                var_class_table,
+                                                var_subroutine_table,
+                                                n_class_field,
+                                                n_fun_var,
+                                                out_file) < 0) {
+                return -1;
+            }
+            //  - add
+            //  - pop pointer 1
+            //  - push THAT 0
+            //  
+            sprintf(print_line, "add\n"
+                                "pop pointer 1\n"
+                                "push THAT 0\n");
+            fwrite(print_line, 1, strlen(print_line), out_file);
         }
         else {
             printf("Compiler code gen vm term - err unknown pattern.\n");
@@ -5527,15 +5554,31 @@ int compiler_code_gen_vm_let_statement(char* class_name,
         return -1;
     }
 
+    struct compiler_parser_elem* expression1 = NULL;
+    struct compiler_parser_elem* expression2 = statement_elem->next->next->next;
+
     if (statement_elem->next->next->type == COMPILER_PARSER_ELEM_TOKEN &&
         statement_elem->next->next->token.type == COMPILER_TOKEN_NAME_SYMBOL &&
         (!strcmp("[", statement_elem->next->next->token.token))) {
-        sprintf(print_line, "// TODO index var\n");
-        fwrite(print_line, 1, strlen(print_line), out_file);
-        return 0;
+        // let arr '[' expression1 ']' = expression2
+
+        expression1 = statement_elem->next->next->next;
+
+        if (expression1->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+            printf("Compiler code gen vm let statement - expected expression after '['.\n");
+            return -1;
+        }
+
+        if (expression1->next == NULL ||
+            expression1->next->next == NULL ||
+            (expression2 = expression1->next->next->next) == NULL ||
+            expression2->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+            printf("Compiler code gen vm let statement - expected expression after '[' expression ']' = .\n");
+            return -1;
+        }
     }
 
-    if (statement_elem->next->next->next->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+    if (expression2->type != COMPILER_PARSER_ELEM_EXPRESSION) {
         printf("Compiler code gen vm let statement - expected expression.\n");
         return -1;
     }
@@ -5543,7 +5586,7 @@ int compiler_code_gen_vm_let_statement(char* class_name,
     if (compiler_code_gen_vm_expression(class_name,
                                         fun_name,
                                         routine_kind,
-                                        statement_elem->next->next->next,
+                                        expression2,
                                         var_class_table,
                                         var_subroutine_table,
                                         n_class_field,
@@ -5558,15 +5601,40 @@ int compiler_code_gen_vm_let_statement(char* class_name,
         return -1;
     }
     char* var_name = statement_elem->next->token.token;
-
     struct compiler_code_gen_var* var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
     if (var == NULL) {
         printf("Compiler code gen vm let statement - unknown varName = %s.\n", var_name);
         return -1;
     }
-
-    if (compiler_code_gen_vm_pop_var(class_name, var, out_file) < 0)
-        return -1;
+    if (expression1 == NULL) {
+        // not array
+        if (compiler_code_gen_vm_pop_var(class_name, var, out_file) < 0)
+            return -1;
+    } else {
+        // array
+        //  - push array variable (there is a address)
+        if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
+            return -1;
+        //  - push expression1
+        if (compiler_code_gen_vm_expression(class_name,
+                                            fun_name,
+                                            routine_kind,
+                                            expression1,
+                                            var_class_table,
+                                            var_subroutine_table,
+                                            n_class_field,
+                                            n_fun_var,
+                                            out_file) < 0) {
+            return -1;
+        }
+        //  - add to address,
+        //  - to THAT
+        //   - expression2 to THAT 0
+        sprintf(print_line, "add\n"
+                            "pop pointer 1\n"
+                            "pop that 0\n");
+        fwrite(print_line, 1, strlen(print_line), out_file);
+    }
 
     return 0;
 }
