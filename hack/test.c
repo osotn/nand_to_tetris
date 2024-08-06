@@ -3042,7 +3042,7 @@ int compiler_parse_term(tokens_t* tokens, int* n, struct compiler_parser_elem* p
         switch (state) {
 
             case state_term:
-                // intConst | stringConstat | keywordConst
+                // intConst | stringConst | keywordConst
                 if (COMPILER_TOKEN_NAME_INT_CONST == token->type ||
                     COMPILER_TOKEN_NAME_STRING_CONST == token->type ||
                     compiler_is_token_keyword_const(token)) {
@@ -5062,9 +5062,9 @@ int compiler_code_gen_vm_op(char* class_name,
     else if (!strcmp("=", op_elem->token.token))
         sprintf(print_line, "eq\n");
     else if (!strcmp("*", op_elem->token.token))
-        sprintf(print_line, "//TODO Multiply\n");
+        sprintf(print_line, "call Math.multiply 2\n");
     else if (!strcmp("/", op_elem->token.token))
-        sprintf(print_line, "//TODO Div\n");
+        sprintf(print_line, "call Math.divide 2\n");
     else {
         printf("Compiler code gen vm op - err unknown op = %s\n", op_elem->token.token);
         return -1;
@@ -5119,18 +5119,47 @@ int compiler_code_gen_vm_term(char* class_name,
         return -1;
     }
 
-    
     if (term_elem->next == NULL) {
-        // Only one token
+        // Only one token: intConstant | stringConstant | keywordConstant | varName
         if (term_elem->type != COMPILER_PARSER_ELEM_TOKEN) {
             printf("Compiler code gen vm term - err expect token.\n");
             return -1;
         }
         if (term_elem->token.type == COMPILER_TOKEN_NAME_INT_CONST) {
+            // intConstant
             sprintf(print_line, "push constant %s\n", term_elem->token.token);
             fwrite(print_line, 1, strlen(print_line), out_file);
         }
+        else if (term_elem->token.type == COMPILER_TOKEN_NAME_STRING_CONST) {
+            // stringConstant
+            sprintf(print_line, "// TOOD stringConstant\n");
+            fwrite(print_line, 1, strlen(print_line), out_file);
+        }
+        else if (term_elem->token.type == COMPILER_TOKEN_NAME_KEYWORD &&
+                 compiler_is_token_keyword_const(&(term_elem->token))) {
+            // keywordConstant
+            int8_t type = compiler_get_keyword_type(term_elem->token.token);
+            //
+            if (type == COMPILER_KEYWORD_TRUE ||
+                type == COMPILER_KEYWORD_FALSE ||
+                type == COMPILER_KEYWORD_NULL ) {
+                //
+                sprintf(print_line, "push constant 0\n");
+                fwrite(print_line, 1, strlen(print_line), out_file);
+            }
+            if (type == COMPILER_KEYWORD_TRUE) {
+                //
+                sprintf(print_line, "not\n");
+                fwrite(print_line, 1, strlen(print_line), out_file);
+            }
+            if (type == COMPILER_KEYWORD_THIS) {
+                //
+                sprintf(print_line, "push pointer 0\n");
+                fwrite(print_line, 1, strlen(print_line), out_file);
+            } 
+        }
         else if (term_elem->token.type == COMPILER_TOKEN_NAME_IDENTIFIER) {
+            // varName
             char* var_name = term_elem->token.token;
             struct compiler_code_gen_var* var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
             if (var == NULL) {
@@ -5142,8 +5171,8 @@ int compiler_code_gen_vm_term(char* class_name,
                 return -1;
         }
         else {
-            sprintf(print_line, "// TODO keyword const\n");
-            fwrite(print_line, 1, strlen(print_line), out_file);
+            printf("Compiler code gen vm term - unknown pattern\n");
+            return -1;
         }
     }
     else {
