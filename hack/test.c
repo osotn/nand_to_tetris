@@ -5164,9 +5164,65 @@ int compiler_code_gen_vm_term(char* class_name,
                 return -1;
             }
         }
-        else {
-             sprintf(print_line, "// TODO complex term\n");
+        else if (term_elem->type == COMPILER_PARSER_ELEM_TOKEN &&
+                 term_elem->token.type == COMPILER_TOKEN_NAME_SYMBOL &&
+                 (!strcmp("(", term_elem->token.token))) {
+            // '(' expression ')'
+            if (term_elem->next->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+                printf("Compiler code gen vm term - err expected expression after '('\n");
+                return -1;
+            }
+            //
+            if (compiler_code_gen_vm_expression(class_name,
+                                                fun_name,
+                                                routine_kind,
+                                                term_elem->next,
+                                                var_class_table,
+                                                var_subroutine_table,
+                                                n_class_field,
+                                                n_fun_var,
+                                                out_file) < 0) {
+                return -1;
+            }
+        }
+        else if (term_elem->type == COMPILER_PARSER_ELEM_TOKEN &&
+                 ((!strcmp("-", term_elem->token.token)) ||
+                  (!strcmp("~", term_elem->token.token)))) {
+            // (unaryOp term)
+            if (term_elem->next->type != COMPILER_PARSER_ELEM_TERM) {
+                printf("Compiler code gen vm term - err expected term after unaryOp.\n");
+                return -1;
+            }
+            //
+            if (compiler_code_gen_vm_term(class_name,
+                                          fun_name,
+                                          routine_kind,
+                                          term_elem->next,
+                                          var_class_table,
+                                          var_subroutine_table,
+                                          n_class_field,
+                                          n_fun_var,
+                                          out_file) < 0) {
+                return -1;
+            }
+            //
+            sprintf(print_line, "%s\n", (!strcmp("-", term_elem->token.token)) ? "neg" : "not");
+            fwrite(print_line, 1, strlen(print_line), out_file);
+        }
+        else if (term_elem->next->type == COMPILER_PARSER_ELEM_TOKEN &&
+                 (!strcmp("[", term_elem->next->token.token))) {
+            // varName '[' expression ']'
+            if (term_elem->next->next != NULL ||
+                term_elem->next->next->type != COMPILER_PARSER_ELEM_EXPRESSION) {
+                printf("Compiler code gen vm term - err expected term after varName '['.\n");
+                return -1;
+            }
+             sprintf(print_line, "// TODO varName '[' expression ']'.\n");
              fwrite(print_line, 1, strlen(print_line), out_file);
+        }
+        else {
+            printf("Compiler code gen vm term - err unknown pattern.\n");
+            return -1;
         }
     }
 
