@@ -5256,15 +5256,6 @@ int compiler_code_gen_vm_term(char* class_name,
                 printf("Compiler code gen vm term - err expected expression after varName '['.\n");
                 return -1;
             }
-            //  - push arr (address in variable)
-            char* var_name = term_elem->token.token;
-            struct compiler_code_gen_var* var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
-            if (var == NULL) {
-                printf("Compiler code gen vm term - unknown varName = %s.\n", var_name);
-                return -1;
-            }
-            if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
-                return -1;
             //  - push expression
             if (compiler_code_gen_vm_expression(class_name,
                                                 fun_name,
@@ -5277,6 +5268,15 @@ int compiler_code_gen_vm_term(char* class_name,
                                                 out_file) < 0) {
                 return -1;
             }
+            //  - push arr (address in variable)
+            char* var_name = term_elem->token.token;
+            struct compiler_code_gen_var* var = compiler_code_gen_find_fun_var(var_class_table, var_subroutine_table, var_name);
+            if (var == NULL) {
+                printf("Compiler code gen vm term - unknown varName = %s.\n", var_name);
+                return -1;
+            }
+            if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
+                return -1;
             //  - add
             //  - pop pointer 1
             //  - push THAT 0
@@ -5622,18 +5622,6 @@ int compiler_code_gen_vm_let_statement(char* class_name,
         return -1;
     }
 
-    if (compiler_code_gen_vm_expression(class_name,
-                                        fun_name,
-                                        routine_kind,
-                                        expression2,
-                                        var_class_table,
-                                        var_subroutine_table,
-                                        n_class_field,
-                                        n_fun_var,
-                                        out_file) < 0) {
-        return -1;
-    }
-
     if (statement_elem->next->type != COMPILER_PARSER_ELEM_TOKEN ||
         statement_elem->next->token.type != COMPILER_TOKEN_NAME_IDENTIFIER) {
         printf("Compiler code gen vm let statement - expected varName.\n");
@@ -5645,15 +5633,9 @@ int compiler_code_gen_vm_let_statement(char* class_name,
         printf("Compiler code gen vm let statement - unknown varName = %s.\n", var_name);
         return -1;
     }
-    if (expression1 == NULL) {
-        // not array
-        if (compiler_code_gen_vm_pop_var(class_name, var, out_file) < 0)
-            return -1;
-    } else {
+
+    if (expression1 != NULL) {
         // array
-        //  - push array variable (there is a address)
-        if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
-            return -1;
         //  - push expression1
         if (compiler_code_gen_vm_expression(class_name,
                                             fun_name,
@@ -5666,13 +5648,43 @@ int compiler_code_gen_vm_let_statement(char* class_name,
                                             out_file) < 0) {
             return -1;
         }
-        //  - add to address,
+        //  - push array variable (there is a address)
+        if (compiler_code_gen_vm_push_var(class_name, var, out_file) < 0)
+            return -1;
+        //  - add to address
+        sprintf(print_line, "add\n");
+        fwrite(print_line, 1, strlen(print_line), out_file);
+    }
+
+    if (compiler_code_gen_vm_expression(class_name,
+                                        fun_name,
+                                        routine_kind,
+                                        expression2,
+                                        var_class_table,
+                                        var_subroutine_table,
+                                        n_class_field,
+                                        n_fun_var,
+                                        out_file) < 0) {
+        return -1;
+    }
+
+    if (expression1 != NULL) {
+        // array
+        //  - pop temp
         //  - to THAT
-        //   - expression2 to THAT 0
-        sprintf(print_line, "add\n"
+        //  - push temp
+        //  - pop that 0
+        sprintf(print_line, "pop temp 0\n"
                             "pop pointer 1\n"
+                            "push temp 0\n"
                             "pop that 0\n");
         fwrite(print_line, 1, strlen(print_line), out_file);
+    }
+
+    if (expression1 == NULL) {
+        // not array
+        if (compiler_code_gen_vm_pop_var(class_name, var, out_file) < 0)
+            return -1;
     }
 
     return 0;
@@ -5976,7 +5988,7 @@ int compiler_code_gen_vm_do_statement(char* class_name,
     }
 
     // skip value
-    sprintf(print_line, "pop temp\n");
+    sprintf(print_line, "pop temp 0\n");
     fwrite(print_line, 1, strlen(print_line), out_file);
 
     return 0;
@@ -6920,30 +6932,38 @@ int main()
 	    computer_init(&computer);
 	    
 #if 1
-	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_STRIP, "Main.jack_strip");
-	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "MainT.xml");
-	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Main.xml");
-	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Main.symbol_table");
-	    compiler_do("Main.jack", COMPILER_OUT_FORMAT_VM, "Main.vm");
+	    compiler_do("Array.jack", COMPILER_OUT_FORMAT_STRIP, "Array.jack_strip");
+	    compiler_do("Array.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "ArrayT.xml");
+	    compiler_do("Array.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Array.xml");
+	    compiler_do("Array.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Array.symbol_table");
+	    compiler_do("Array.jack", COMPILER_OUT_FORMAT_VM, "Array.vm");
 #endif
-	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_STRIP, "Square.jack_strip");
-	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareT.xml");
-	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Square.xml");
-	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Square.symbol_table");
-	    compiler_do("Square.jack", COMPILER_OUT_FORMAT_VM, "Square.vm");
+
 #if 1
-	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_STRIP, "SquareGame.jack_strip");
-	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "SquareGameT.xml");
-	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_XML_PARSER, "SquareGame.xml");
-	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "SquareGame.symbol_table");
-	    compiler_do("SquareGame.jack", COMPILER_OUT_FORMAT_VM, "SquareGame.vm");
-	    
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_STRIP, "Main2.jack_strip");
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "Main2T.xml");
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Main2.xml");
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Main2.symbol_table");
-	    compiler_do("Main2.jack", COMPILER_OUT_FORMAT_VM, "Main2.vm");
+	    compiler_do("Memory.jack", COMPILER_OUT_FORMAT_STRIP, "Memory.jack_strip");
+	    compiler_do("Memory.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "MemoryT.xml");
+	    compiler_do("Memory.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Memory.xml");
+	    compiler_do("Memory.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Memory.symbol_table");
+	    compiler_do("Memory.jack", COMPILER_OUT_FORMAT_VM, "Memory.vm");
 #endif
+
+#if 1
+	    compiler_do("String.jack", COMPILER_OUT_FORMAT_STRIP, "String.jack_strip");
+	    compiler_do("String.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "StringT.xml");
+	    compiler_do("String.jack", COMPILER_OUT_FORMAT_XML_PARSER, "String.xml");
+	    compiler_do("String.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "String.symbol_table");
+	    compiler_do("String.jack", COMPILER_OUT_FORMAT_VM, "String.vm");
+#endif
+
+#if 1
+	    compiler_do("Keyboard.jack", COMPILER_OUT_FORMAT_STRIP, "Keyboard.jack_strip");
+	    compiler_do("Keyboard.jack", COMPILER_OUT_FORMAT_XML_TOKENS, "KeyboardT.xml");
+	    compiler_do("Keyboard.jack", COMPILER_OUT_FORMAT_XML_PARSER, "Keyboard.xml");
+	    compiler_do("Keyboard.jack", COMPILER_OUT_FORMAT_VAR_SYMBOL_TABLE, "Keyboard.symbol_table");
+	    compiler_do("Keyboard.jack", COMPILER_OUT_FORMAT_VM, "Keyboard.vm");
+#endif
+
+
 	    // TODO
 	    return 0;
 	
